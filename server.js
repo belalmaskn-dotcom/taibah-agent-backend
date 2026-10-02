@@ -62,7 +62,8 @@ const ADMIN_WHATSAPP_NUMBERS =
     .filter(Boolean);
 
 const CONTACT_NUMBER =
-  '0530084666';
+  process.env.CONTACT_NUMBER ||
+  '0564685620';
 
 
 // =====================================================
@@ -166,7 +167,7 @@ app.get(
     res
       .status(200)
       .send(
-        'Sadin AI Agent is running'
+        'Taibah AI Agent is running'
       );
   }
 );
@@ -1714,7 +1715,7 @@ async function buildAdminSummary() {
 
 
   return (
-`📊 تقرير سدّين
+`📊 تقرير استثمارات طيبة
 
 إجمالي الرسائل المسجلة:
 ${conversationResult.rows[0]?.count || 0}
@@ -1982,7 +1983,7 @@ async function sendAdminExcelReport(
 
 
     const filename =
-      `sadin-report-${Date.now()}.xlsx`;
+      `taibah-report-${Date.now()}.xlsx`;
 
 
     const mediaId =
@@ -2007,7 +2008,7 @@ async function sendAdminExcelReport(
       adminPhone,
       mediaId,
       filename,
-      '📊 تقرير سدّين الكامل'
+      '📊 تقرير استثمارات طيبة الكامل'
     );
 
   } catch (err) {
@@ -2660,7 +2661,7 @@ async function startServer() {
       () => {
 
         console.log(
-          `Sadin AI Agent running on port ${PORT}`
+          `Taibah AI Agent running on port ${PORT}`
         );
 
 

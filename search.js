@@ -1,107 +1,228 @@
 // search.js
-// البحث في عقارات سدّين المخزنة في PostgreSQL
+// البحث في عقارات استثمارات طيبة — يقرأ مباشرة من API موقع طيبة
+// العقارات تُحفظ مؤقتًا في الذاكرة 10 دقائق ثم تتحدث تلقائيًا
 
-const { Pool } = require('pg');
+const axios = require('axios');
 
-if (!process.env.DATABASE_URL) {
-  console.error('❌ DATABASE_URL غير موجود');
+const SITE_URL =
+  (
+    process.env.TAIBAH_SITE_URL ||
+    'https://taibah-realestate.onrender.com'
+  ).replace(/\/$/, '');
+
+const CACHE_MS = 10 * 60 * 1000;
+
+let cache = {
+  items: [],
+  fetchedAt: 0,
+};
+
+
+// =====================================================
+// أدوات النص
+// =====================================================
+
+function convertArabicDigits(text = '') {
+  return String(text || '').replace(
+    /[٠-٩]/g,
+    (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+  );
 }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl:
-    process.env.DATABASE_URL &&
-    !process.env.DATABASE_URL.includes('localhost') &&
-    !process.env.DATABASE_URL.includes('127.0.0.1')
-      ? { rejectUnauthorized: false }
-      : false,
-});
-
-
-// =====================================================
-// تنظيف النص العربي
-// =====================================================
-
 function normalizeArabicText(text = '') {
-  return String(text || '')
+  return convertArabicDigits(text)
     .trim()
     .toLowerCase()
     .replace(/[أإآ]/g, 'ا')
     .replace(/ى/g, 'ي')
-    .replace(/[ًٌٍَُِّْ]/g, '')
+    .replace(/ة/g, 'ه')
+    .replace(/[ًٌٍَُِّْـ]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 
 // =====================================================
-// تحويل الغرض
+// جلب كل العقارات من الموقع
 // =====================================================
 
-function normalizePurpose(purpose = '') {
-  const p = normalizeArabicText(purpose);
+async function fetchAllProperties(force = false) {
 
   if (
-    p === 'sale' ||
-    p === 'for sale' ||
-    p === 'بيع' ||
-    p === 'للبيع' ||
-    p === 'شراء'
+    !force &&
+    cache.items.length &&
+    Date.now() - cache.fetchedAt < CACHE_MS
   ) {
-    return 'بيع';
+    return cache.items;
   }
 
-  if (
-    p === 'rent' ||
-    p === 'for rent' ||
-    p === 'ايجار' ||
-    p === 'إيجار' ||
-    p === 'للايجار' ||
-    p === 'للإيجار'
-  ) {
-    return 'إيجار';
-  }
+  try {
 
-  return purpose || null;
+    const all = [];
+    let page = 1;
+    let totalPages = 1;
+
+    do {
+
+      const response =
+        await axios.get(
+          `${SITE_URL}/api/properties`,
+          {
+            params: {
+              page,
+              limit: 50,
+            },
+            timeout: 60000,
+          }
+        );
+
+      const data =
+        response.data?.data || [];
+
+      all.push(...data);
+
+      totalPages =
+        Number(
+          response.data?.pagination?.totalPages
+        ) || 1;
+
+      page++;
+
+    } while (
+      page <= totalPages &&
+      page <= 60
+    );
+
+    const items =
+      all.filter(
+        (p) =>
+          !p.status ||
+          p.status === 'approved'
+      );
+
+    cache = {
+      items,
+      fetchedAt: Date.now(),
+    };
+
+    console.log(
+      `✅ تم تحديث عقارات طيبة: ${items.length} عقار`
+    );
+
+    return items;
+
+  } catch (err) {
+
+    console.error(
+      '❌ خطأ في جلب عقارات طيبة:',
+      err.message
+    );
+
+    // لو فيه نسخة قديمة نستخدمها بدل ما نوقف
+    if (cache.items.length) {
+      return cache.items;
+    }
+
+    throw err;
+  }
 }
 
 
 // =====================================================
-// تحويل نوع العقار
+// أنواع العقارات
 // =====================================================
 
-function getPropertyTypeVariants(type = '') {
+function getTypeVariants(type = '') {
+
   const t = normalizeArabicText(type);
 
-  if (!t) {
-    return [];
-  }
+  if (!t) return [];
 
   const groups = [
-    ['شقه', 'شقة', 'apartment', 'apartments'],
-    ['فيلا', 'فله', 'villa', 'villas'],
-    ['ارض', 'أرض', 'land', 'residential land'],
-    ['عماره', 'عمارة', 'building', 'residential building'],
-    ['مبنى', 'مبني', 'building'],
-    ['استراحه', 'استراحة', 'rest house'],
-    ['مكتب', 'office'],
-    ['معرض', 'showroom', 'exhibition'],
-    ['محل', 'shop'],
-    ['مستودع', 'warehouse'],
-    ['مزرعه', 'مزرعة', 'farm'],
+    ['شقه', 'شقق', 'apartment'],
+    ['فيلا', 'فله', 'فلل', 'villa'],
+    ['دور', 'ادوار', 'floor'],
+    ['ارض تجاريه', 'commercial land'],
+    ['ارض خام', 'raw land'],
+    ['ارض', 'اراضي', 'land'],
+    ['عماره تجاريه', 'commercial building'],
+    ['عماره', 'عمائر', 'building'],
+    ['استراحه', 'استراحات', 'rest house'],
+    ['مزرعه', 'مزارع', 'farm'],
+    ['قصر', 'قصور', 'palace'],
+    ['فندق', 'فنادق', 'hotel'],
+    ['محطه وقود', 'محطه', 'محطات', 'gas station'],
   ];
 
   for (const group of groups) {
     if (
-      group.some((item) =>
-        t.includes(normalizeArabicText(item))
+      group.some((v) =>
+        t.includes(normalizeArabicText(v))
       )
     ) {
-      return group;
+      return group.map(normalizeArabicText);
     }
   }
 
-  return [type];
+  return [t];
+}
+
+
+function purposeMatches(listingType, purpose) {
+
+  if (!purpose) return true;
+
+  const p = normalizeArabicText(purpose);
+  const lt = String(listingType || '').toLowerCase();
+
+  if (['sale', 'بيع', 'للبيع', 'شراء'].includes(p)) {
+    return !lt || lt.includes('sale');
+  }
+
+  if (['rent', 'ايجار', 'للايجار'].includes(p)) {
+    return lt.includes('rent');
+  }
+
+  return true;
+}
+
+
+function purposeArabic(listingType) {
+  const lt = String(listingType || '').toLowerCase();
+  if (lt.includes('rent')) return 'إيجار';
+  if (lt.includes('sale')) return 'بيع';
+  return null;
+}
+
+
+function parseLinks(links) {
+  try {
+    const arr =
+      typeof links === 'string'
+        ? JSON.parse(links || '[]')
+        : links || [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+
+function toPublic(p) {
+  return {
+    offer_no: p.offer_no ?? null,
+    title: p.title || null,
+    type: p.type || null,
+    purpose_ar: purposeArabic(p.listing_type),
+    city: p.city || null,
+    district: p.district ? String(p.district).trim() : null,
+    price: p.price ?? null,
+    area: p.area ?? null,
+    description: String(p.description || '')
+      .replace(/\r/g, '')
+      .slice(0, 2000),
+    links: parseLinks(p.links),
+  };
 }
 
 
@@ -110,436 +231,146 @@ function getPropertyTypeVariants(type = '') {
 // =====================================================
 
 async function searchProperties(criteria = {}) {
-  const clauses = [
-    'is_active = TRUE'
-  ];
 
-  const values = [];
+  const items = await fetchAllProperties();
 
-  function addValue(value) {
-    values.push(value);
-    return `$${values.length}`;
-  }
+  let limit = Number(criteria.limit) || 5;
+  limit = Math.min(Math.max(limit, 1), 10);
 
-
-  // ---------------------------------------------------
-  // المدينة
-  // ---------------------------------------------------
-
-  if (criteria.city) {
-    const value = addValue(
-      `%${normalizeArabicText(criteria.city)}%`
+  // ---- رقم عرض محدد ----
+  if (
+    criteria.offer_no !== undefined &&
+    criteria.offer_no !== null &&
+    criteria.offer_no !== ''
+  ) {
+    const no = Number(
+      convertArabicDigits(String(criteria.offer_no)).replace(/\D/g, '')
     );
 
-    clauses.push(`
-      (
-        LOWER(
-          TRANSLATE(
-            COALESCE(city, ''),
-            'أإآى',
-            'اااي'
-          )
-        ) LIKE ${value}
-      )
-    `);
-  }
-
-
-  // ---------------------------------------------------
-  // الحي
-  // ---------------------------------------------------
-
-  if (criteria.district) {
-    const value = addValue(
-      `%${normalizeArabicText(criteria.district)
-        .replace(/^حي\s+/, '')}%`
+    const found = items.filter(
+      (p) => Number(p.offer_no) === no
     );
 
-    clauses.push(`
-      (
-        LOWER(
-          TRANSLATE(
-            COALESCE(district, ''),
-            'أإآى',
-            'اااي'
-          )
-        ) LIKE ${value}
-      )
-    `);
-  }
-
-
-  // ---------------------------------------------------
-  // نوع العقار
-  // ---------------------------------------------------
-
-  if (criteria.property_type) {
-    const variants =
-      getPropertyTypeVariants(
-        criteria.property_type
-      );
-
-    if (variants.length) {
-      const typeClauses = [];
-
-      for (const variant of variants) {
-        const value = addValue(
-          `%${normalizeArabicText(variant)}%`
-        );
-
-        typeClauses.push(`
-          (
-            LOWER(
-              TRANSLATE(
-                COALESCE(property_type_ar, ''),
-                'أإآى',
-                'اااي'
-              )
-            ) LIKE ${value}
-
-            OR
-
-            LOWER(
-              COALESCE(property_type, '')
-            ) LIKE ${value}
-          )
-        `);
-      }
-
-      clauses.push(
-        `(${typeClauses.join(' OR ')})`
-      );
+    if (found.length) {
+      return found.map(toPublic);
     }
   }
 
+  const typeVariants = getTypeVariants(criteria.property_type);
 
-  // ---------------------------------------------------
-  // بيع / إيجار
-  // ---------------------------------------------------
+  const district = criteria.district
+    ? normalizeArabicText(criteria.district).replace(/^حي\s+/, '')
+    : null;
 
-  if (criteria.purpose) {
-    const purpose =
-      normalizePurpose(
-        criteria.purpose
-      );
+  const city = criteria.city
+    ? normalizeArabicText(criteria.city)
+    : null;
 
-    const value =
-      addValue(purpose);
+  const keyword = criteria.keyword
+    ? normalizeArabicText(criteria.keyword)
+    : null;
 
-    clauses.push(`
-      purpose_ar = ${value}
-    `);
-  }
+  const num = (v) =>
+    v === undefined || v === null || v === ''
+      ? null
+      : Number(v);
 
+  const minPrice = num(criteria.min_price);
+  const maxPrice = num(criteria.max_price);
+  const minArea = num(criteria.min_area);
+  const maxArea = num(criteria.max_area);
 
-  // ---------------------------------------------------
-  // السعر
-  // ---------------------------------------------------
+  const results = items.filter((p) => {
 
-  if (
-    criteria.min_price !== undefined &&
-    criteria.min_price !== null &&
-    criteria.min_price !== ''
-  ) {
-    const value =
-      addValue(
-        Number(criteria.min_price)
-      );
-
-    clauses.push(`
-      price >= ${value}
-    `);
-  }
-
-
-  if (
-    criteria.max_price !== undefined &&
-    criteria.max_price !== null &&
-    criteria.max_price !== ''
-  ) {
-    const value =
-      addValue(
-        Number(criteria.max_price)
-      );
-
-    clauses.push(`
-      price <= ${value}
-    `);
-  }
-
-
-  // ---------------------------------------------------
-  // المساحة
-  // ---------------------------------------------------
-
-  if (
-    criteria.min_area !== undefined &&
-    criteria.min_area !== null &&
-    criteria.min_area !== ''
-  ) {
-    const value =
-      addValue(
-        Number(criteria.min_area)
-      );
-
-    clauses.push(`
-      area >= ${value}
-    `);
-  }
-
-
-  if (
-    criteria.max_area !== undefined &&
-    criteria.max_area !== null &&
-    criteria.max_area !== ''
-  ) {
-    const value =
-      addValue(
-        Number(criteria.max_area)
-      );
-
-    clauses.push(`
-      area <= ${value}
-    `);
-  }
-
-
-  // ---------------------------------------------------
-  // عدد الغرف
-  // ---------------------------------------------------
-
-  if (
-    criteria.min_rooms !== undefined &&
-    criteria.min_rooms !== null &&
-    criteria.min_rooms !== ''
-  ) {
-    const value =
-      addValue(
-        Number(criteria.min_rooms)
-      );
-
-    clauses.push(`
-      rooms >= ${value}
-    `);
-  }
-
-
-  if (
-    criteria.max_rooms !== undefined &&
-    criteria.max_rooms !== null &&
-    criteria.max_rooms !== ''
-  ) {
-    const value =
-      addValue(
-        Number(criteria.max_rooms)
-      );
-
-    clauses.push(`
-      rooms <= ${value}
-    `);
-  }
-
-
-  if (
-    criteria.rooms !== undefined &&
-    criteria.rooms !== null &&
-    criteria.rooms !== ''
-  ) {
-    const value =
-      addValue(
-        Number(criteria.rooms)
-      );
-
-    clauses.push(`
-      rooms = ${value}
-    `);
-  }
-
-
-  // ---------------------------------------------------
-  // الحد الأقصى للنتائج
-  // ---------------------------------------------------
-
-  let limit =
-    Number(criteria.limit) || 5;
-
-  if (limit < 1) {
-    limit = 1;
-  }
-
-  if (limit > 20) {
-    limit = 20;
-  }
-
-  const limitValue =
-    addValue(limit);
-
-
-  // ---------------------------------------------------
-  // الاستعلام
-  // ---------------------------------------------------
-
-  const sql = `
-    SELECT
-      bayut_id,
-      rega_license,
-      status,
-
-      purpose,
-      purpose_ar,
-
-      property_type,
-      property_type_ar,
-
-      title,
-      title_ar,
-
-      description,
-      description_ar,
-
-      price,
-      area,
-      rooms,
-      beds,
-      baths,
-
-      city,
-      district,
-      street,
-      street_width,
-
-      property_face,
-      property_age,
-
-      furnished,
-      residence_type,
-      completion_status,
-
-      plan_number,
-      land_number,
-      deed_number,
-
-      notes,
-      features,
-
-      latitude,
-      longitude,
-
-      bayut_url,
-      rega_url,
-
-      posted_at,
-      bayut_updated_at,
-      expiry_date,
-
-      images
-
-    FROM bayut_properties
-
-    WHERE
-      ${clauses.join('\nAND ')}
-
-    ORDER BY
-      CASE
-        WHEN bayut_updated_at IS NULL
-        THEN 1
-        ELSE 0
-      END,
-
-      bayut_updated_at DESC,
-
-      updated_at DESC
-
-    LIMIT ${limitValue};
-  `;
-
-
-  try {
-    const result =
-      await pool.query(
-        sql,
-        values
-      );
-
-    return result.rows;
-
-  } catch (error) {
-    console.error(
-      '❌ خطأ البحث في bayut_properties:',
-      error
+    const type = normalizeArabicText(p.type);
+    const text = normalizeArabicText(
+      `${p.title || ''} ${p.district || ''} ${p.description || ''}`
     );
 
-    throw error;
-  }
+    // النوع
+    if (typeVariants.length) {
+      const ok = typeVariants.some(
+        (v) =>
+          type.includes(v) ||
+          normalizeArabicText(p.title).includes(v)
+      );
+      if (!ok) return false;
+    }
+
+    // بيع / إيجار
+    if (!purposeMatches(p.listing_type, criteria.purpose)) {
+      return false;
+    }
+
+    // المدينة
+    if (city && p.city) {
+      const c = normalizeArabicText(p.city);
+      if (!c.includes(city) && !city.includes(c)) {
+        return false;
+      }
+    }
+
+    // الحي (في خانة الحي أو داخل الوصف)
+    if (district && !text.includes(district)) {
+      return false;
+    }
+
+    // كلمة مميزة
+    if (keyword && !text.includes(keyword)) {
+      return false;
+    }
+
+    // السعر (العقارات بدون سعر لا تُستبعد)
+    const price = Number(p.price) || null;
+    if (price) {
+      if (minPrice !== null && price < minPrice) return false;
+      if (maxPrice !== null && price > maxPrice) return false;
+    }
+
+    // المساحة (فقط لو مسجلة)
+    const area = Number(p.area) || null;
+    if (area) {
+      if (minArea !== null && area < minArea) return false;
+      if (maxArea !== null && area > maxArea) return false;
+    }
+
+    return true;
+  });
+
+  // العقارات اللي سعرها مسجل أولًا لو العميل حدد ميزانية، ثم الأحدث
+  results.sort((a, b) => {
+    if (minPrice !== null || maxPrice !== null) {
+      const ap = Number(a.price) ? 0 : 1;
+      const bp = Number(b.price) ? 0 : 1;
+      if (ap !== bp) return ap - bp;
+    }
+    return (Number(b.id) || 0) - (Number(a.id) || 0);
+  });
+
+  return results.slice(0, limit).map(toPublic);
 }
 
 
 // =====================================================
-// جلب عقار محدد برقم Bayut
-// =====================================================
-
-async function getPropertyByBayutId(
-  bayutId
-) {
-  if (!bayutId) {
-    return null;
-  }
-
-  const result =
-    await pool.query(
-      `
-        SELECT *
-        FROM bayut_properties
-        WHERE bayut_id = $1
-        LIMIT 1
-      `,
-      [bayutId]
-    );
-
-  return result.rows[0] || null;
-}
-
-
-// =====================================================
-// اختبار مباشر
-//
-// node search.js
+// اختبار مباشر:  node search.js
 // =====================================================
 
 if (require.main === module) {
   (async () => {
     try {
-      const results =
-        await searchProperties({
-          city: 'المدينة المنورة',
-          property_type: 'شقة',
-          purpose: 'sale',
-          limit: 5,
-        });
-
-      console.log(
-        JSON.stringify(
-          results,
-          null,
-          2
-        )
-      );
-
-    } catch (error) {
-      console.error(error);
-
-    } finally {
-      await pool.end();
+      const r = await searchProperties({
+        property_type: 'فيلا',
+        purpose: 'sale',
+        limit: 3,
+      });
+      console.log(JSON.stringify(r, null, 2));
+    } catch (e) {
+      console.error(e.message);
     }
   })();
 }
 
-
-// =====================================================
-// التصدير
-// =====================================================
-
 module.exports = {
   searchProperties,
-  getPropertyByBayutId,
+  fetchAllProperties,
 };
