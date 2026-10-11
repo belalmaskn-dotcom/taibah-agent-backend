@@ -4,6 +4,8 @@ const express = require('express');
 const axios = require('axios');
 const { Pool } = require('pg');
 const XLSX = require('xlsx');
+const path = require('path');
+const fs = require('fs');
 
 const {
   generateReplyDetailed,
@@ -81,6 +83,40 @@ const MANAGER_WHATSAPP_NUMBER =
     process.env.MANAGER_WHATSAPP_NUMBER ||
     '966544574050'
   ).replace(/\D/g, '');
+
+// =====================================================
+// القوالب (رسائل نرسلها للعملاء من نفسنا)
+// =====================================================
+
+// رابط السيرفر نفسه (عشان واتساب يقدر يحمّل الفيديو منه)
+const PUBLIC_BASE_URL =
+  (
+    process.env.PUBLIC_BASE_URL ||
+    'https://taibah-agent-backend.onrender.com'
+  ).replace(/\/$/, '');
+
+// كل قالب له كلمة تكتبها بعد كلمة السر
+// مثال: 102030 رونق 0551234567
+const TEMPLATES = {
+
+  'رونق': {
+    name: 'rawnaq_project',
+    language: 'ar',
+    videoFile: 'rawnaq.mp4',
+    // هذا النص يتحفظ في المحادثة عشان البوت يعرف إن العميل وصله عرض الرونق
+    logText:
+`[قالب مرسل للعميل: مشروع الرونق]
+السلام عليكم ورحمة الله 🌹
+نقدّم لك مشروع الرونق 🏛️ شقق فندقية بتصميم أندلسي فاخر في المدينة المنورة.
+مواصفات الشقة: المساحة 135 م²، 4 غرف + صالة + مطبخ، 3 دورات مياه، ملحق خاص للعاملة.
+خدمات المشروع: صالات استقبال للرجال والنساء، نادي رياضي، غرف خاصة للسائقين، مواقف سيارات.
+للتفاصيل والأسعار: أزرار (اتصل بالمدير / أبي التفاصيل / احجز شراء) أو 0544574050`,
+  },
+};
+
+// أقصى عدد أرقام في الأمر الواحد
+const MAX_NUMBERS_PER_COMMAND = 50;
+
 
 // ما نزعج المدير بنفس العميل أكثر من مرة كل 30 دقيقة
 const MANAGER_ALERT_COOLDOWN_MS =
@@ -198,6 +234,32 @@ app.get(
       .send(
         'Taibah AI Agent is running'
       );
+  }
+);
+
+
+// ملفات الفيديو للقوالب (واتساب يحمّلها من هنا)
+app.get(
+  '/media/:file',
+  (req, res) => {
+
+    const file =
+      path.basename(
+        String(req.params.file || '')
+      );
+
+    if (!/\.(mp4|jpg|jpeg|png)$/i.test(file)) {
+      return res.sendStatus(404);
+    }
+
+    const fullPath =
+      path.join(__dirname, file);
+
+    if (!fs.existsSync(fullPath)) {
+      return res.sendStatus(404);
+    }
+
+    res.sendFile(fullPath);
   }
 );
 
@@ -1288,7 +1350,8 @@ ${MANAGER_DISPLAY_NUMBER} 📞`
 
 async function escalateToManager(
   customerPhone,
-  question
+  question,
+  urgent = false
 ) {
 
   const phone =
@@ -1313,6 +1376,7 @@ async function escalateToManager(
     0;
 
   if (
+    !urgent &&
     now - last <
     MANAGER_ALERT_COOLDOWN_MS
   ) {
@@ -1381,6 +1445,325 @@ ${String(question || '').slice(0, 800)}`;
       err
     );
   }
+}
+
+
+// =====================================================
+// تحويل أي رقم سعودي للصيغة الدولية
+// 0551234567 / 551234567 / +966551234567 / 00966551234567 → 966551234567
+// =====================================================
+
+function toInternationalSaudi(
+  raw
+) {
+
+  let n =
+    normalizePhone(raw);
+
+  if (n.startsWith('00')) {
+    n = n.slice(2);
+  }
+
+  if (/^05\d{8}$/.test(n)) {
+    return `966${n.slice(1)}`;
+  }
+
+  if (/^5\d{8}$/.test(n)) {
+    return `966${n}`;
+  }
+
+  if (/^9665\d{8}$/.test(n)) {
+    return n;
+  }
+
+  // أرقام دولية ثانية (مو سعودية)
+  if (n.length >= 10 && n.length <= 15 && !n.startsWith('0')) {
+    return n;
+  }
+
+  return null;
+}
+
+
+function convertDigitsToEnglish(
+  text
+) {
+
+  return String(text || '')
+    .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+    .replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
+}
+
+
+// =====================================================
+// إرسال قالب واتساب
+// =====================================================
+
+async function sendWhatsAppTemplate(
+  to,
+  template
+) {
+
+  const components = [];
+
+  if (template.videoFile) {
+    components.push({
+      type: 'header',
+      parameters: [
+        {
+          type: 'video',
+          video: {
+            link:
+              `${PUBLIC_BASE_URL}/media/${template.videoFile}`,
+          },
+        },
+      ],
+    });
+  }
+
+  try {
+
+    await axios.post(
+
+      `https://graph.facebook.com/v23.0/${PHONE_NUMBER_ID}/messages`,
+
+      {
+        messaging_product: 'whatsapp',
+        to: normalizePhone(to),
+        type: 'template',
+        template: {
+          name: template.name,
+          language: {
+            code: template.language,
+          },
+          components,
+        },
+      },
+
+      {
+        headers: {
+          Authorization:
+            `Bearer ${WHATSAPP_TOKEN}`,
+          'Content-Type':
+            'application/json',
+        },
+        timeout: 30000,
+      }
+    );
+
+    return { ok: true };
+
+  } catch (err) {
+
+    const details =
+      err.response?.data?.error ||
+      err.message;
+
+    console.error(
+      'WhatsApp send template error:',
+      JSON.stringify(details, null, 2)
+    );
+
+    return {
+      ok: false,
+      error:
+        details?.error_user_msg ||
+        details?.message ||
+        String(details),
+    };
+  }
+}
+
+
+// =====================================================
+// أوامر الإدارة لإرسال القوالب
+// مثال: 102030 رونق 0551234567 0559876543
+// =====================================================
+
+function parseAdminCommand(
+  text
+) {
+
+  if (!ADMIN_REPORT_CODE) {
+    return null;
+  }
+
+  const value =
+    convertDigitsToEnglish(text).trim();
+
+  if (!value.startsWith(ADMIN_REPORT_CODE)) {
+    return null;
+  }
+
+  const rest =
+    value.slice(ADMIN_REPORT_CODE.length).trim();
+
+  if (!rest) {
+    return null;
+  }
+
+  if (
+    rest === 'مساعدة' ||
+    rest === 'مساعده' ||
+    rest === 'help'
+  ) {
+    return { type: 'help' };
+  }
+
+  const firstWord =
+    rest.split(/\s+/)[0];
+
+  const template =
+    TEMPLATES[firstWord];
+
+  if (!template) {
+    return null;
+  }
+
+  // كل سطر ممكن يكون فيه رقم واحد (حتى لو فيه مسافات)
+  // أو أكثر من رقم بينهم مسافات
+  const numbers = [];
+
+  const lines =
+    rest
+      .slice(firstWord.length)
+      .split(/[\n,،;]+/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+  for (const line of lines) {
+
+    const compact =
+      line.replace(/[\s\-()]/g, '');
+
+    const whole =
+      /^\+?\d{9,15}$/.test(compact)
+        ? toInternationalSaudi(compact)
+        : null;
+
+    if (whole) {
+      numbers.push(whole);
+      continue;
+    }
+
+    for (const token of line.split(/\s+/)) {
+
+      const n =
+        toInternationalSaudi(token);
+
+      if (n) {
+        numbers.push(n);
+      }
+    }
+  }
+
+  return {
+    type: 'send_template',
+    templateKey: firstWord,
+    template,
+    numbers: [...new Set(numbers)],
+  };
+}
+
+
+function adminHelpText() {
+
+  return (
+`📋 أوامر الإدارة
+
+📊 التقرير:
+${ADMIN_REPORT_CODE}
+
+📤 إرسال قالب لعميل أو أكثر:
+${ADMIN_REPORT_CODE} رونق 0551234567
+
+لأكثر من عميل، اكتب كل رقم في سطر أو بينهم مسافة (حتى ${MAX_NUMBERS_PER_COMMAND} رقم).
+
+القوالب المتاحة:
+${Object.keys(TEMPLATES).join('، ')}`
+  );
+}
+
+
+async function runAdminSendTemplate(
+  adminPhone,
+  command
+) {
+
+  if (!command.numbers.length) {
+
+    await sendWhatsAppText(
+      adminPhone,
+      `ما لقيت أرقام في الرسالة ❌\n\nاكتبها كذا:\n${ADMIN_REPORT_CODE} ${command.templateKey} 0551234567`
+    );
+
+    return;
+  }
+
+  if (command.numbers.length > MAX_NUMBERS_PER_COMMAND) {
+
+    await sendWhatsAppText(
+      adminPhone,
+      `العدد كبير ❌ أقصى شي ${MAX_NUMBERS_PER_COMMAND} رقم في المرة الوحدة.`
+    );
+
+    return;
+  }
+
+  await sendWhatsAppText(
+    adminPhone,
+    `⏳ جاري إرسال قالب "${command.templateKey}" إلى ${command.numbers.length} رقم...`
+  );
+
+  const sent = [];
+  const failed = [];
+
+  for (const number of command.numbers) {
+
+    const result =
+      await sendWhatsAppTemplate(
+        number,
+        command.template
+      );
+
+    if (result.ok) {
+
+      sent.push(number);
+
+      // نحفظ في محادثة العميل عشان البوت يعرف إنه وصله العرض
+      await saveConversation(
+        number,
+        'assistant',
+        command.template.logText ||
+          `[قالب مرسل: ${command.template.name}]`
+      );
+
+    } else {
+
+      failed.push(`${number} (${result.error})`);
+    }
+
+    // مهلة بسيطة بين كل رسالة
+    await new Promise((r) => setTimeout(r, 400));
+  }
+
+  console.log(
+    `📤 قالب ${command.template.name}: نجح ${sent.length} — فشل ${failed.length}`
+  );
+
+  let summary =
+`✅ تم الإرسال: ${sent.length}
+❌ فشل: ${failed.length}`;
+
+  if (failed.length) {
+    summary +=
+      `\n\nالأرقام اللي فشلت:\n${failed.slice(0, 20).join('\n')}`;
+  }
+
+  await sendWhatsAppText(
+    adminPhone,
+    summary
+  );
 }
 
 
@@ -1950,6 +2333,30 @@ async function extractIncomingContent(
     };
   }
 
+  // ضغطة زر في قالب (رد سريع)
+  if (message.type === 'button') {
+
+    return {
+      type: 'button',
+      text:
+        message.button?.text ||
+        message.button?.payload ||
+        '',
+    };
+  }
+
+  // ضغطة زر أو اختيار من قائمة (رسائل تفاعلية)
+  if (message.type === 'interactive') {
+
+    return {
+      type: 'button',
+      text:
+        message.interactive?.button_reply?.title ||
+        message.interactive?.list_reply?.title ||
+        '',
+    };
+  }
+
   // Voice / Audio
   if (message.type === 'audio') {
 
@@ -2179,6 +2586,33 @@ async function processCustomerMessage(
     return;
   }
 
+  // أوامر الإدارة الثانية (إرسال قوالب / مساعدة)
+  if (isAdminPhone(from)) {
+
+    const command =
+      parseAdminCommand(userText);
+
+    if (command?.type === 'help') {
+
+      await sendWhatsAppText(
+        from,
+        adminHelpText()
+      );
+
+      return;
+    }
+
+    if (command?.type === 'send_template') {
+
+      await runAdminSendTemplate(
+        from,
+        command
+      );
+
+      return;
+    }
+  }
+
   // history قبل حفظ الرسالة الحالية
   const history =
     await getConversationHistory(
@@ -2277,7 +2711,10 @@ async function processCustomerMessage(
 
     await escalateToManager(
       from,
-      userText
+      result.managerNote
+        ? `${result.managerNote}\n(رسالة العميل: ${userText})`
+        : userText,
+      Boolean(result.managerNote)
     );
   }
 }
@@ -2427,6 +2864,10 @@ async function startServer() {
 
         console.log(
           `Manager escalation: ${MANAGER_WHATSAPP_NUMBER}`
+        );
+
+        console.log(
+          `Templates: ${Object.keys(TEMPLATES).join(', ')}`
         );
       }
     );
