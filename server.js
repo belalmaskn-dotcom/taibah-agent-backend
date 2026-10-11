@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const XLSX = require('xlsx');
 
 const {
-  generateReply,
+  generateReplyDetailed,
   generateStickerReply,
   isViewingRequest,
   extractViewingData,
@@ -67,6 +67,30 @@ const CONTACT_NUMBER =
 
 
 // =====================================================
+// المدير العام (التحويل لما البوت ما يعرف يرد)
+// =====================================================
+
+// الرقم اللي يظهر للعميل
+const MANAGER_DISPLAY_NUMBER =
+  process.env.MANAGER_DISPLAY_NUMBER ||
+  '0544574050';
+
+// رقم واتساب المدير بالصيغة الدولية (لإرسال التنبيه)
+const MANAGER_WHATSAPP_NUMBER =
+  String(
+    process.env.MANAGER_WHATSAPP_NUMBER ||
+    '966544574050'
+  ).replace(/\D/g, '');
+
+// ما نزعج المدير بنفس العميل أكثر من مرة كل 30 دقيقة
+const MANAGER_ALERT_COOLDOWN_MS =
+  30 * 60 * 1000;
+
+const lastManagerAlert =
+  new Map();
+
+
+// =====================================================
 // PostgreSQL
 // =====================================================
 
@@ -91,7 +115,6 @@ const pool =
 pool.on(
   'error',
   (err) => {
-
     console.error(
       'PostgreSQL pool error:',
       err
@@ -116,12 +139,10 @@ async function initializeDatabase() {
     );
   `);
 
-
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_conversations_phone
     ON conversations(customer_phone);
   `);
-
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS viewing_requests (
@@ -134,7 +155,6 @@ async function initializeDatabase() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
-
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS viewing_sessions (
@@ -149,6 +169,16 @@ async function initializeDatabase() {
     );
   `);
 
+  // جدول جديد: الأسئلة اللي تحولت للمدير
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS manager_escalations (
+      id SERIAL PRIMARY KEY,
+      customer_phone VARCHAR(30) NOT NULL,
+      question TEXT,
+      manager_notified BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
 
   console.log(
     'Database tables ready'
@@ -163,7 +193,6 @@ async function initializeDatabase() {
 app.get(
   '/',
   (req, res) => {
-
     res
       .status(200)
       .send(
@@ -183,7 +212,6 @@ app.get(
         'SELECT 1'
       );
 
-
       res.json({
         ok: true,
         database: true,
@@ -195,7 +223,6 @@ app.get(
         'Health check error:',
         err
       );
-
 
       res
         .status(500)
@@ -217,38 +244,27 @@ app.get(
   (req, res) => {
 
     const mode =
-      req.query[
-        'hub.mode'
-      ];
+      req.query['hub.mode'];
 
     const token =
-      req.query[
-        'hub.verify_token'
-      ];
+      req.query['hub.verify_token'];
 
     const challenge =
-      req.query[
-        'hub.challenge'
-      ];
-
+      req.query['hub.challenge'];
 
     if (
-      mode ===
-        'subscribe' &&
-      token ===
-        VERIFY_TOKEN
+      mode === 'subscribe' &&
+      token === VERIFY_TOKEN
     ) {
 
       console.log(
         'Webhook verified'
       );
 
-
       return res
         .status(200)
         .send(challenge);
     }
-
 
     return res.sendStatus(
       403
@@ -283,7 +299,6 @@ function isAdminPhone(
       phone
     );
 
-
   return ADMIN_WHATSAPP_NUMBERS.includes(
     normalized
   );
@@ -310,7 +325,6 @@ async function sendWhatsAppText(
 
     return false;
   }
-
 
   try {
 
@@ -354,7 +368,6 @@ async function sendWhatsAppText(
       }
     );
 
-
     return true;
 
   } catch (err) {
@@ -368,7 +381,6 @@ async function sendWhatsAppText(
         2
       )
     );
-
 
     return false;
   }
@@ -387,10 +399,8 @@ async function getWhatsAppMediaInfo(
     !mediaId ||
     !WHATSAPP_TOKEN
   ) {
-
     return null;
   }
-
 
   try {
 
@@ -410,7 +420,6 @@ async function getWhatsAppMediaInfo(
         }
       );
 
-
     return response.data;
 
   } catch (err) {
@@ -424,7 +433,6 @@ async function getWhatsAppMediaInfo(
         2
       )
     );
-
 
     return null;
   }
@@ -444,15 +452,12 @@ async function downloadWhatsAppMedia(
       mediaId
     );
 
-
   if (
     !info ||
     !info.url
   ) {
-
     return null;
   }
-
 
   try {
 
@@ -473,7 +478,6 @@ async function downloadWhatsAppMedia(
         }
       );
 
-
     return {
       buffer:
         Buffer.from(
@@ -482,9 +486,7 @@ async function downloadWhatsAppMedia(
 
       mimeType:
         info.mime_type ||
-        response.headers[
-          'content-type'
-        ] ||
+        response.headers['content-type'] ||
         'application/octet-stream',
 
       sha256:
@@ -508,7 +510,6 @@ async function downloadWhatsAppMedia(
       )
     );
 
-
     return null;
   }
 }
@@ -527,62 +528,31 @@ function extensionFromMimeType(
       mimeType
     ).toLowerCase();
 
-
-  if (
-    type.includes(
-      'ogg'
-    )
-  ) {
-
+  if (type.includes('ogg')) {
     return 'ogg';
   }
 
-
   if (
-    type.includes(
-      'mpeg'
-    ) ||
-    type.includes(
-      'mp3'
-    )
+    type.includes('mpeg') ||
+    type.includes('mp3')
   ) {
-
     return 'mp3';
   }
 
-
   if (
-    type.includes(
-      'mp4'
-    ) ||
-    type.includes(
-      'm4a'
-    )
+    type.includes('mp4') ||
+    type.includes('m4a')
   ) {
-
     return 'm4a';
   }
 
-
-  if (
-    type.includes(
-      'wav'
-    )
-  ) {
-
+  if (type.includes('wav')) {
     return 'wav';
   }
 
-
-  if (
-    type.includes(
-      'webm'
-    )
-  ) {
-
+  if (type.includes('webm')) {
     return 'webm';
   }
-
 
   return 'ogg';
 }
@@ -593,9 +563,7 @@ async function transcribeAudio(
   mimeType
 ) {
 
-  if (
-    !OPENAI_API_KEY
-  ) {
+  if (!OPENAI_API_KEY) {
 
     console.error(
       'OPENAI_API_KEY is missing'
@@ -604,15 +572,12 @@ async function transcribeAudio(
     return null;
   }
 
-
   if (
     !audioBuffer ||
     !audioBuffer.length
   ) {
-
     return null;
   }
-
 
   try {
 
@@ -621,10 +586,8 @@ async function transcribeAudio(
         mimeType
       );
 
-
     const form =
       new FormData();
-
 
     const blob =
       new Blob(
@@ -636,19 +599,16 @@ async function transcribeAudio(
         }
       );
 
-
     form.append(
       'file',
       blob,
       `voice.${extension}`
     );
 
-
     form.append(
       'model',
       'gpt-4o-mini-transcribe'
     );
-
 
     const response =
       await axios.post(
@@ -674,25 +634,20 @@ async function transcribeAudio(
         }
       );
 
-
     const text =
       response.data?.text;
-
 
     if (
       !text ||
       !String(text).trim()
     ) {
-
       return null;
     }
-
 
     console.log(
       'Voice transcription:',
       String(text).trim()
     );
-
 
     return String(
       text
@@ -710,7 +665,6 @@ async function transcribeAudio(
       )
     );
 
-
     return null;
   }
 }
@@ -725,9 +679,7 @@ async function describeSticker(
   mimeType
 ) {
 
-  if (
-    !OPENAI_API_KEY
-  ) {
+  if (!OPENAI_API_KEY) {
 
     console.error(
       'OPENAI_API_KEY is missing'
@@ -736,15 +688,12 @@ async function describeSticker(
     return null;
   }
 
-
   if (
     !stickerBuffer ||
     !stickerBuffer.length
   ) {
-
     return null;
   }
-
 
   try {
 
@@ -752,16 +701,13 @@ async function describeSticker(
       mimeType ||
       'image/webp';
 
-
     const base64 =
       stickerBuffer.toString(
         'base64'
       );
 
-
     const dataUrl =
       `data:${actualMime};base64,${base64}`;
-
 
     const response =
       await axios.post(
@@ -836,28 +782,21 @@ async function describeSticker(
         }
       );
 
-
     const directText =
       response.data?.output_text;
 
-
     if (
       directText &&
-      String(
-        directText
-      ).trim()
+      String(directText).trim()
     ) {
-
       return String(
         directText
       ).trim();
     }
 
-
     const output =
       response.data?.output ||
       [];
-
 
     for (
       const item
@@ -868,25 +807,21 @@ async function describeSticker(
         item.content ||
         [];
 
-
       for (
         const part
         of content
       ) {
 
         if (
-          part.type ===
-            'output_text' &&
+          part.type === 'output_text' &&
           part.text
         ) {
-
           return String(
             part.text
           ).trim();
         }
       }
     }
-
 
     return null;
 
@@ -901,7 +836,6 @@ async function describeSticker(
         2
       )
     );
-
 
     return null;
   }
@@ -985,14 +919,12 @@ async function getConversationHistory(
         ]
       );
 
-
     return result.rows
       .reverse()
       .map(
         (row) => ({
           role:
-            row.role ===
-            'assistant'
+            row.role === 'assistant'
               ? 'assistant'
               : 'user',
 
@@ -1007,7 +939,6 @@ async function getConversationHistory(
       'Get conversation history error:',
       err
     );
-
 
     return [];
   }
@@ -1040,7 +971,6 @@ async function getViewingSession(
         ]
       );
 
-
     return (
       result.rows[0] ||
       null
@@ -1052,7 +982,6 @@ async function getViewingSession(
       'Get viewing session error:',
       err
     );
-
 
     return null;
   }
@@ -1096,27 +1025,13 @@ async function startViewingSession(
         (customer_phone)
 
         DO UPDATE SET
-
-          property_name =
-            EXCLUDED.property_name,
-
-          requested_day =
-            NULL,
-
-          requested_time =
-            NULL,
-
-          customer_type =
-            NULL,
-
-          status =
-            'active',
-
-          created_at =
-            CURRENT_TIMESTAMP,
-
-          updated_at =
-            CURRENT_TIMESTAMP
+          property_name = EXCLUDED.property_name,
+          requested_day = NULL,
+          requested_time = NULL,
+          customer_type = NULL,
+          status = 'active',
+          created_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
 
         RETURNING *
         `,
@@ -1130,7 +1045,6 @@ async function startViewingSession(
         ]
       );
 
-
     return (
       result.rows[0] ||
       null
@@ -1143,7 +1057,6 @@ async function startViewingSession(
       err
     );
 
-
     return null;
   }
 }
@@ -1154,97 +1067,45 @@ async function updateViewingSession(
   fields = {}
 ) {
 
-  const updates =
-    [];
+  const updates = [];
+  const values = [];
+  let index = 1;
 
-  const values =
-    [];
-
-  let index =
-    1;
-
-
-  if (
-    fields.propertyName !==
-    undefined
-  ) {
-
-    updates.push(
-      `property_name = $${index++}`
-    );
-
-    values.push(
-      fields.propertyName
-    );
+  if (fields.propertyName !== undefined) {
+    updates.push(`property_name = $${index++}`);
+    values.push(fields.propertyName);
   }
 
-
-  if (
-    fields.day !==
-    undefined
-  ) {
-
-    updates.push(
-      `requested_day = $${index++}`
-    );
-
-    values.push(
-      fields.day
-    );
+  if (fields.day !== undefined) {
+    updates.push(`requested_day = $${index++}`);
+    values.push(fields.day);
   }
 
-
-  if (
-    fields.time !==
-    undefined
-  ) {
-
-    updates.push(
-      `requested_time = $${index++}`
-    );
-
-    values.push(
-      fields.time
-    );
+  if (fields.time !== undefined) {
+    updates.push(`requested_time = $${index++}`);
+    values.push(fields.time);
   }
 
-
-  if (
-    fields.customerType !==
-    undefined
-  ) {
-
-    updates.push(
-      `customer_type = $${index++}`
-    );
-
-    values.push(
-      fields.customerType
-    );
+  if (fields.customerType !== undefined) {
+    updates.push(`customer_type = $${index++}`);
+    values.push(fields.customerType);
   }
 
-
-  if (
-    !updates.length
-  ) {
-
+  if (!updates.length) {
     return getViewingSession(
       customerPhone
     );
   }
 
-
   updates.push(
     'updated_at = CURRENT_TIMESTAMP'
   );
-
 
   values.push(
     normalizePhone(
       customerPhone
     )
   );
-
 
   try {
 
@@ -1263,7 +1124,6 @@ async function updateViewingSession(
         values
       );
 
-
     return (
       result.rows[0] ||
       null
@@ -1275,7 +1135,6 @@ async function updateViewingSession(
       'Update viewing session error:',
       err
     );
-
 
     return null;
   }
@@ -1354,7 +1213,6 @@ async function saveViewingRequest(
         ]
       );
 
-
     return (
       result.rows[0] ||
       null
@@ -1366,7 +1224,6 @@ async function saveViewingRequest(
       'Save viewing request error:',
       err
     );
-
 
     return null;
   }
@@ -1381,13 +1238,9 @@ async function notifyAdminsAboutViewing(
   request
 ) {
 
-  if (
-    !ADMIN_WHATSAPP_NUMBERS.length
-  ) {
-
+  if (!ADMIN_WHATSAPP_NUMBERS.length) {
     return;
   }
-
 
   const message =
 `🏠 طلب معاينة جديد
@@ -1407,7 +1260,6 @@ ${request.time}
 الصفة:
 ${request.customerType}`;
 
-
   for (
     const adminPhone
     of ADMIN_WHATSAPP_NUMBERS
@@ -1416,6 +1268,117 @@ ${request.customerType}`;
     await sendWhatsAppText(
       adminPhone,
       message
+    );
+  }
+}
+
+
+// =====================================================
+// التحويل للمدير العام
+// =====================================================
+
+function managerLineForCustomer() {
+
+  return (
+`للتواصل المباشر مع المدير العام:
+${MANAGER_DISPLAY_NUMBER} 📞`
+  );
+}
+
+
+async function escalateToManager(
+  customerPhone,
+  question
+) {
+
+  const phone =
+    normalizePhone(
+      customerPhone
+    );
+
+  // لو المدير نفسه هو اللي يكلم البوت، ما نبلغه عن نفسه
+  if (
+    !MANAGER_WHATSAPP_NUMBER ||
+    phone === MANAGER_WHATSAPP_NUMBER
+  ) {
+    return;
+  }
+
+  // منع الإزعاج: تنبيه واحد لنفس العميل كل 30 دقيقة
+  const now =
+    Date.now();
+
+  const last =
+    lastManagerAlert.get(phone) ||
+    0;
+
+  if (
+    now - last <
+    MANAGER_ALERT_COOLDOWN_MS
+  ) {
+
+    console.log(
+      `⏳ تم تبليغ المدير عن ${phone} قبل شوي — ما نعيد`
+    );
+
+    return;
+  }
+
+  lastManagerAlert.set(
+    phone,
+    now
+  );
+
+  const message =
+`🔔 عميل يحتاج تواصل
+
+البوت ما قدر يجاوب على سؤال العميل.
+
+رقم العميل:
++${phone}
+
+للتواصل معه مباشرة:
+https://wa.me/${phone}
+
+سؤاله:
+${String(question || '').slice(0, 800)}`;
+
+  const sent =
+    await sendWhatsAppText(
+      MANAGER_WHATSAPP_NUMBER,
+      message
+    );
+
+  console.log(
+    sent
+      ? `📨 تم تبليغ المدير عن العميل ${phone}`
+      : `❌ ما قدرنا نبلغ المدير عن العميل ${phone} (غالبًا المدير ما راسل رقم البوت آخر 24 ساعة)`
+  );
+
+  try {
+
+    await pool.query(
+      `
+      INSERT INTO manager_escalations
+      (
+        customer_phone,
+        question,
+        manager_notified
+      )
+      VALUES ($1, $2, $3)
+      `,
+      [
+        phone,
+        String(question || ''),
+        sent,
+      ]
+    );
+
+  } catch (err) {
+
+    console.error(
+      'Save manager escalation error:',
+      err
     );
   }
 }
@@ -1436,27 +1399,21 @@ async function processViewingFlow({
       customerPhone
     );
 
-
   const newViewingRequest =
     isViewingRequest(
       userText
     );
 
-
   // لا يوجد موعد نشط
   // والعميل لم يبدأ معاينة جديدة
-
   if (
     !session &&
     !newViewingRequest
   ) {
-
     return null;
   }
 
-
   // بدء جلسة جديدة
-
   if (
     !session &&
     newViewingRequest
@@ -1468,66 +1425,39 @@ async function processViewingFlow({
         userText
       );
 
-
     session =
       await startViewingSession(
         customerPhone,
         propertyName
       );
 
-
     if (!session) {
-
       return null;
     }
   }
 
-
   // نقرأ الرسالة الحالية فقط.
-
   const extracted =
     extractViewingData(
       [],
       userText
     );
 
+  const updates = {};
 
-  const updates =
-    {};
-
-
-  if (
-    extracted.day
-  ) {
-
-    updates.day =
-      extracted.day;
+  if (extracted.day) {
+    updates.day = extracted.day;
   }
 
-
-  if (
-    extracted.time
-  ) {
-
-    updates.time =
-      extracted.time;
+  if (extracted.time) {
+    updates.time = extracted.time;
   }
 
-
-  if (
-    extracted.customerType
-  ) {
-
-    updates.customerType =
-      extracted.customerType;
+  if (extracted.customerType) {
+    updates.customerType = extracted.customerType;
   }
 
-
-  if (
-    Object.keys(
-      updates
-    ).length
-  ) {
+  if (Object.keys(updates).length) {
 
     const updatedSession =
       await updateViewingSession(
@@ -1535,61 +1465,40 @@ async function processViewingFlow({
         updates
       );
 
-
-    if (
-      updatedSession
-    ) {
-
-      session =
-        updatedSession;
+    if (updatedSession) {
+      session = updatedSession;
     }
   }
 
-
-  if (
-    !session.requested_day
-  ) {
+  if (!session.requested_day) {
 
     return {
       handled: true,
-
       completed: false,
-
       reply:
         'أبشر 👍 حدد لي أي يوم حاب توقف على العقار؟',
     };
   }
 
-
-  if (
-    !session.requested_time
-  ) {
+  if (!session.requested_time) {
 
     return {
       handled: true,
-
       completed: false,
-
       reply:
 `تمام 👍 يوم ${session.requested_day}. الساعة كم يناسبك؟`,
     };
   }
 
-
-  if (
-    !session.customer_type
-  ) {
+  if (!session.customer_type) {
 
     return {
       handled: true,
-
       completed: false,
-
       reply:
         'تمام 👍 هل أنت المشتري ولا مكتب عقاري؟',
     };
   }
-
 
   const completedRequest =
     {
@@ -1612,24 +1521,18 @@ async function processViewingFlow({
         session.customer_type,
     };
 
-
   // مهم:
   // نقفل الجلسة قبل الرد النهائي
   // حتى لا ترجع تفتح بعد "السلام عليكم".
-
   await closeViewingSession(
     customerPhone
   );
 
-
   return {
     handled: true,
-
     completed: true,
-
     request:
       completedRequest,
-
     reply:
 `تم تسجيل طلب الوقوف على ${completedRequest.propertyName} 👍
 
@@ -1650,29 +1553,21 @@ function isAdminReportCommand(
   text
 ) {
 
+  // نحول الأرقام العربية عشان "١٠٢٠٣٠" تشتغل زي "102030"
   const value =
-    String(
-      text || ''
-    ).trim();
+    String(text || '')
+      .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+      .replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d))
+      .trim();
 
-
-  if (
-    !ADMIN_REPORT_CODE
-  ) {
-
+  if (!ADMIN_REPORT_CODE) {
     return false;
   }
 
-
   return (
-    value ===
-      ADMIN_REPORT_CODE ||
-
-    value ===
-      `${ADMIN_REPORT_CODE} تقرير` ||
-
-    value ===
-      `${ADMIN_REPORT_CODE} report`
+    value === ADMIN_REPORT_CODE ||
+    value === `${ADMIN_REPORT_CODE} تقرير` ||
+    value === `${ADMIN_REPORT_CODE} report`
   );
 }
 
@@ -1684,6 +1579,8 @@ async function buildAdminSummary() {
     customerResult,
     viewingResult,
     todayViewingResult,
+    escalationResult,
+    todayEscalationResult,
   ] =
     await Promise.all([
 
@@ -1708,11 +1605,20 @@ async function buildAdminSummary() {
       pool.query(`
         SELECT COUNT(*)::int AS count
         FROM viewing_requests
-        WHERE created_at >=
-          CURRENT_DATE
+        WHERE created_at >= CURRENT_DATE
+      `),
+
+      pool.query(`
+        SELECT COUNT(*)::int AS count
+        FROM manager_escalations
+      `),
+
+      pool.query(`
+        SELECT COUNT(*)::int AS count
+        FROM manager_escalations
+        WHERE created_at >= CURRENT_DATE
       `),
     ]);
-
 
   return (
 `📊 تقرير استثمارات طيبة
@@ -1727,7 +1633,13 @@ ${customerResult.rows[0]?.count || 0}
 ${viewingResult.rows[0]?.count || 0}
 
 طلبات المعاينة اليوم:
-${todayViewingResult.rows[0]?.count || 0}`
+${todayViewingResult.rows[0]?.count || 0}
+
+أسئلة تحولت للمدير (الإجمالي):
+${escalationResult.rows[0]?.count || 0}
+
+أسئلة تحولت للمدير اليوم:
+${todayEscalationResult.rows[0]?.count || 0}`
   );
 }
 
@@ -1750,7 +1662,6 @@ async function createReportWorkbook() {
       ORDER BY created_at DESC
     `);
 
-
   const viewings =
     await pool.query(`
       SELECT
@@ -1765,45 +1676,44 @@ async function createReportWorkbook() {
       ORDER BY created_at DESC
     `);
 
+  const escalations =
+    await pool.query(`
+      SELECT
+        id,
+        customer_phone,
+        question,
+        manager_notified,
+        created_at
+      FROM manager_escalations
+      ORDER BY created_at DESC
+    `);
 
   const workbook =
     XLSX.utils.book_new();
 
-
-  const conversationSheet =
-    XLSX.utils.json_to_sheet(
-      conversations.rows
-    );
-
-
-  const viewingSheet =
-    XLSX.utils.json_to_sheet(
-      viewings.rows
-    );
-
-
   XLSX.utils.book_append_sheet(
     workbook,
-    conversationSheet,
+    XLSX.utils.json_to_sheet(conversations.rows),
     'Conversations'
   );
 
-
   XLSX.utils.book_append_sheet(
     workbook,
-    viewingSheet,
+    XLSX.utils.json_to_sheet(viewings.rows),
     'Viewing Requests'
   );
 
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.json_to_sheet(escalations.rows),
+    'Manager Escalations'
+  );
 
   return XLSX.write(
     workbook,
     {
-      type:
-        'buffer',
-
-      bookType:
-        'xlsx',
+      type: 'buffer',
+      bookType: 'xlsx',
     }
   );
 }
@@ -1823,12 +1733,10 @@ async function uploadWhatsAppDocument(
     const form =
       new FormData();
 
-
     form.append(
       'messaging_product',
       'whatsapp'
     );
-
 
     const blob =
       new Blob(
@@ -1839,13 +1747,11 @@ async function uploadWhatsAppDocument(
         }
       );
 
-
     form.append(
       'file',
       blob,
       filename
     );
-
 
     const response =
       await axios.post(
@@ -1871,7 +1777,6 @@ async function uploadWhatsAppDocument(
         }
       );
 
-
     return (
       response.data?.id ||
       null
@@ -1888,7 +1793,6 @@ async function uploadWhatsAppDocument(
         2
       )
     );
-
 
     return null;
   }
@@ -1923,11 +1827,8 @@ async function sendWhatsAppDocument(
           'document',
 
         document: {
-          id:
-            mediaId,
-
+          id: mediaId,
           filename,
-
           caption:
             caption || undefined,
         },
@@ -1947,7 +1848,6 @@ async function sendWhatsAppDocument(
       }
     );
 
-
     return true;
 
   } catch (err) {
@@ -1961,7 +1861,6 @@ async function sendWhatsAppDocument(
         2
       )
     );
-
 
     return false;
   }
@@ -1981,17 +1880,14 @@ async function sendAdminExcelReport(
     const buffer =
       await createReportWorkbook();
 
-
     const filename =
       `taibah-report-${Date.now()}.xlsx`;
-
 
     const mediaId =
       await uploadWhatsAppDocument(
         buffer,
         filename
       );
-
 
     if (!mediaId) {
 
@@ -2002,7 +1898,6 @@ async function sendAdminExcelReport(
 
       return;
     }
-
 
     await sendWhatsAppDocument(
       adminPhone,
@@ -2017,7 +1912,6 @@ async function sendAdminExcelReport(
       'Admin Excel report error:',
       err
     );
-
 
     await sendWhatsAppText(
       adminPhone,
@@ -2039,85 +1933,52 @@ async function extractIncomingContent(
     !message ||
     !message.type
   ) {
-
     return {
-      type:
-        'unsupported',
-
-      text:
-        null,
+      type: 'unsupported',
+      text: null,
     };
   }
 
-
-  // =================================================
   // Text
-  // =================================================
-
-  if (
-    message.type ===
-    'text'
-  ) {
+  if (message.type === 'text') {
 
     return {
-      type:
-        'text',
-
+      type: 'text',
       text:
         message.text?.body ||
         '',
     };
   }
 
-
-  // =================================================
   // Voice / Audio
-  // =================================================
-
-  if (
-    message.type ===
-    'audio'
-  ) {
+  if (message.type === 'audio') {
 
     const mediaId =
       message.audio?.id;
 
-
     if (!mediaId) {
-
       return {
-        type:
-          'audio',
-
-        text:
-          null,
+        type: 'audio',
+        text: null,
       };
     }
-
 
     console.log(
       'Voice message received:',
       mediaId
     );
 
-
     const media =
       await downloadWhatsAppMedia(
         mediaId
       );
 
-
     if (!media) {
-
       return {
-        type:
-          'audio',
-
-        text:
-          null,
+        type: 'audio',
+        text: null,
       };
     }
-
 
     const transcription =
       await transcribeAudio(
@@ -2125,71 +1986,43 @@ async function extractIncomingContent(
         media.mimeType
       );
 
-
     return {
-      type:
-        'audio',
-
-      text:
-        transcription,
+      type: 'audio',
+      text: transcription,
     };
   }
 
-
-  // =================================================
   // Sticker
-  // =================================================
-
-  if (
-    message.type ===
-    'sticker'
-  ) {
+  if (message.type === 'sticker') {
 
     const mediaId =
       message.sticker?.id;
 
-
     if (!mediaId) {
-
       return {
-        type:
-          'sticker',
-
-        text:
-          null,
-
-        stickerDescription:
-          null,
+        type: 'sticker',
+        text: null,
+        stickerDescription: null,
       };
     }
-
 
     console.log(
       'Sticker received:',
       mediaId
     );
 
-
     const media =
       await downloadWhatsAppMedia(
         mediaId
       );
 
-
     if (!media) {
-
       return {
-        type:
-          'sticker',
-
-        text:
-          null,
-
-        stickerDescription:
-          null,
+        type: 'sticker',
+        text: null,
+        stickerDescription: null,
       };
     }
-
 
     const description =
       await describeSticker(
@@ -2197,26 +2030,16 @@ async function extractIncomingContent(
         media.mimeType
       );
 
-
     return {
-      type:
-        'sticker',
-
-      text:
-        null,
-
-      stickerDescription:
-        description,
+      type: 'sticker',
+      text: null,
+      stickerDescription: description,
     };
   }
 
-
   return {
-    type:
-      'unsupported',
-
-    text:
-      null,
+    type: 'unsupported',
+    text: null,
   };
 }
 
@@ -2234,43 +2057,29 @@ async function processCustomerMessage(
       message.from
     );
 
-
   if (!from) {
-
     return;
   }
-
 
   const incoming =
     await extractIncomingContent(
       message
     );
 
-
-  // =================================================
   // Sticker
-  // =================================================
-
-  if (
-    incoming.type ===
-    'sticker'
-  ) {
+  if (incoming.type === 'sticker') {
 
     console.log(
       'Sticker description:',
       incoming.stickerDescription
     );
 
-
     const reply =
       await generateStickerReply(
         incoming.stickerDescription
       );
 
-
-    // نخزن وصف الاستيكر في السجل
-    // بدل تخزين binary.
-
+    // نخزن وصف الاستيكر في السجل بدل تخزين binary.
     await saveConversation(
       from,
       'user',
@@ -2279,12 +2088,10 @@ async function processCustomerMessage(
         : '[Sticker]'
     );
 
-
     await sendWhatsAppText(
       from,
       reply
     );
-
 
     await saveConversation(
       from,
@@ -2292,49 +2099,33 @@ async function processCustomerMessage(
       reply
     );
 
-
     return;
   }
 
-
-  // =================================================
   // Unsupported
-  // =================================================
-
-  if (
-    incoming.type ===
-    'unsupported'
-  ) {
+  if (incoming.type === 'unsupported') {
 
     console.log(
       'Unsupported WhatsApp message:',
       message.type
     );
 
-
     return;
   }
 
-
-  // =================================================
   // فشل تحويل الصوت
-  // =================================================
-
   if (
-    incoming.type ===
-      'audio' &&
+    incoming.type === 'audio' &&
     !incoming.text
   ) {
 
     const reply =
       'ما قدرت أسمع التسجيل بوضوح 🌹 ممكن تعيد إرسال الريكورد أو تكتب لي طلبك؟';
 
-
     await sendWhatsAppText(
       from,
       reply
     );
-
 
     await saveConversation(
       from,
@@ -2342,10 +2133,8 @@ async function processCustomerMessage(
       reply
     );
 
-
     return;
   }
-
 
   const userText =
     String(
@@ -2353,115 +2142,79 @@ async function processCustomerMessage(
       ''
     ).trim();
 
-
   if (!userText) {
-
     return;
   }
-
 
   console.log(
     `${incoming.type} from ${from}:`,
     userText
   );
 
-
   // =================================================
-  // أوامر الإدارة
+  // أوامر الإدارة (كلمة السر من أرقام الإدارة فقط)
   // =================================================
 
   if (
-    isAdminPhone(
-      from
-    ) &&
-    isAdminReportCommand(
-      userText
-    )
+    isAdminPhone(from) &&
+    isAdminReportCommand(userText)
   ) {
+
+    console.log(
+      `📊 طلب تقرير من الإدارة: ${from}`
+    );
 
     const summary =
       await buildAdminSummary();
-
 
     await sendWhatsAppText(
       from,
       summary
     );
 
-
     await sendAdminExcelReport(
       from
     );
 
-
     return;
   }
 
-
-  // =================================================
   // history قبل حفظ الرسالة الحالية
-  // =================================================
-
   const history =
     await getConversationHistory(
       from,
       20
     );
 
-
-  // =================================================
-  // حفظ الرسالة
-  //
-  // الريكورد يتم حفظ النص الناتج منه.
-  // =================================================
-
+  // حفظ الرسالة (الريكورد يتم حفظ النص الناتج منه)
   await saveConversation(
     from,
     'user',
-    incoming.type ===
-      'audio'
+    incoming.type === 'audio'
       ? `[Voice] ${userText}`
       : userText
   );
 
-
-  // =================================================
   // نظام المعاينة
-  //
-  // الريكورد يدخل نفس المسار بالضبط.
-  // مثال:
-  //
-  // "أبغى أوقف عليها الأربعاء الساعة خمسة"
-  //
-  // =================================================
-
   const viewingResult =
     await processViewingFlow({
-      customerPhone:
-        from,
-
+      customerPhone: from,
       userText,
-
       history,
     });
 
-
-  if (
-    viewingResult?.handled
-  ) {
+  if (viewingResult?.handled) {
 
     await sendWhatsAppText(
       from,
       viewingResult.reply
     );
 
-
     await saveConversation(
       from,
       'assistant',
       viewingResult.reply
     );
-
 
     if (
       viewingResult.completed &&
@@ -2472,51 +2225,61 @@ async function processCustomerMessage(
         viewingResult.request
       );
 
-
       await notifyAdminsAboutViewing(
         viewingResult.request
       );
     }
 
-
     return;
   }
-
 
   // =================================================
   // AI reply
   // =================================================
 
-  const reply =
-    await generateReply(
+  const result =
+    await generateReplyDetailed(
       history,
       userText
     );
 
+  let reply =
+    result?.reply;
 
   if (!reply) {
-
     return;
   }
 
+  // لو البوت ما عرف يجاوب: نعطي العميل رقم المدير ونبلغ المدير
+  if (result.needsManager) {
 
-  // مهم:
-  // الرد دائمًا Text.
-  //
-  // حتى لو رسالة العميل كانت Voice.
-  // لا يوجد إرسال Audio هنا.
+    console.log(
+      `🙋 البوت يحتاج المدير للعميل ${from}`
+    );
 
+    reply =
+      `${reply}\n\n${managerLineForCustomer()}`;
+  }
+
+  // الرد دائمًا Text حتى لو رسالة العميل كانت Voice.
   await sendWhatsAppText(
     from,
     reply
   );
-
 
   await saveConversation(
     from,
     'assistant',
     reply
   );
+
+  if (result.needsManager) {
+
+    await escalateToManager(
+      from,
+      userText
+    );
+  }
 }
 
 
@@ -2528,75 +2291,52 @@ app.post(
   '/webhook',
   async (req, res) => {
 
-    // Meta يحتاج 200 بسرعة.
-    // لذلك نرجع الرد أولًا.
-
+    // Meta يحتاج 200 بسرعة. لذلك نرجع الرد أولًا.
     res.sendStatus(
       200
     );
-
 
     try {
 
       const body =
         req.body;
 
-
       if (
         body?.object !==
         'whatsapp_business_account'
       ) {
-
         return;
       }
-
 
       const entries =
         body.entry ||
         [];
 
-
-      for (
-        const entry
-        of entries
-      ) {
+      for (const entry of entries) {
 
         const changes =
           entry.changes ||
           [];
 
-
-        for (
-          const change
-          of changes
-        ) {
+        for (const change of changes) {
 
           const value =
             change.value;
-
 
           const messages =
             value?.messages ||
             [];
 
+          for (const message of messages) {
 
-          for (
-            const message
-            of messages
-          ) {
-
-            // Status updates لا تدخل هنا
-            // لأنها ليست داخل messages.
-
+            // Status updates لا تدخل هنا لأنها ليست داخل messages.
             try {
 
               await processCustomerMessage(
                 message
               );
 
-            } catch (
-              messageError
-            ) {
+            } catch (messageError) {
 
               console.error(
                 'Process customer message error:',
@@ -2624,12 +2364,10 @@ app.post(
 
 app.use(
   (req, res) => {
-
     res
       .status(404)
       .json({
-        error:
-          'Not found',
+        error: 'Not found',
       });
   }
 );
@@ -2643,18 +2381,13 @@ async function startServer() {
 
   try {
 
-    if (
-      !DATABASE_URL
-    ) {
-
+    if (!DATABASE_URL) {
       throw new Error(
         'DATABASE_URL is missing'
       );
     }
 
-
     await initializeDatabase();
-
 
     app.listen(
       PORT,
@@ -2664,11 +2397,9 @@ async function startServer() {
           `Taibah AI Agent running on port ${PORT}`
         );
 
-
         console.log(
           'WhatsApp text: enabled'
         );
-
 
         console.log(
           `Voice transcription: ${
@@ -2678,13 +2409,24 @@ async function startServer() {
           }`
         );
 
-
         console.log(
           `Sticker understanding: ${
             OPENAI_API_KEY
               ? 'enabled'
               : 'disabled - OPENAI_API_KEY missing'
           }`
+        );
+
+        console.log(
+          `Admin report: ${
+            ADMIN_REPORT_CODE && ADMIN_WHATSAPP_NUMBERS.length
+              ? `enabled (${ADMIN_WHATSAPP_NUMBERS.length} admin numbers)`
+              : 'disabled - ADMIN_REPORT_CODE or ADMIN_WHATSAPP_NUMBERS missing'
+          }`
+        );
+
+        console.log(
+          `Manager escalation: ${MANAGER_WHATSAPP_NUMBER}`
         );
       }
     );
@@ -2695,7 +2437,6 @@ async function startServer() {
       'Server startup error:',
       err
     );
-
 
     process.exit(1);
   }
