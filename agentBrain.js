@@ -1290,10 +1290,50 @@ async function generateReply(
       return 'ياهلا فيك 🌹 ممكن تعيد رسالتك مرة ثانية؟';
     }
 
-    const parsed =
+    console.log(
+      '🧠 فهم الطلب (رد Claude الخام):',
+      rawExtraction
+    );
+
+    let parsed =
       tryParseClaudeResponse(
         rawExtraction
       );
+
+    // لو Claude رد بكلام عادي بدل JSON، نطلب منه مرة ثانية JSON فقط
+    if (!parsed) {
+
+      console.log(
+        '⚠️ الرد مو JSON — نعيد المحاولة'
+      );
+
+      const retryRaw =
+        await callClaude(
+          EXTRACTION_SYSTEM_PROMPT,
+          [
+            ...messages,
+            {
+              role: 'assistant',
+              content: rawExtraction,
+            },
+            {
+              role: 'user',
+              content:
+                '[تنبيه داخلي — العميل لا يرى هذه الرسالة] رجع JSON صالح فقط بالشكل المطلوب، بدون أي كلام قبله أو بعده.',
+            },
+          ]
+        );
+
+      console.log(
+        '🧠 إعادة المحاولة:',
+        retryRaw
+      );
+
+      parsed =
+        tryParseClaudeResponse(
+          retryRaw
+        );
+    }
 
     if (!parsed) {
       return rawExtraction.trim();
@@ -1382,7 +1422,7 @@ async function generateReply(
       ...messages,
       {
         role: 'assistant',
-        content: rawExtraction,
+        content: JSON.stringify(parsed),
       },
       {
         role: 'user',
