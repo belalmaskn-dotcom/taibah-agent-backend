@@ -15,7 +15,12 @@ const {
   detectCurrentProperty,
 } = require('./agentBrain');
 
+const { registerDashboard } = require('./dashboard');
+
 const app = express();
+
+// Render يمرر الطلبات عن طريق proxy
+app.set('trust proxy', 1);
 
 app.use(
   express.json({
@@ -66,6 +71,11 @@ const ADMIN_WHATSAPP_NUMBERS =
 const CONTACT_NUMBER =
   process.env.CONTACT_NUMBER ||
   '0564685620';
+
+// كلمة سر الداشبورد (لو ما انحطت، تستخدم كلمة سر التقرير)
+const DASHBOARD_PASSWORD =
+  process.env.DASHBOARD_PASSWORD ||
+  ADMIN_REPORT_CODE;
 
 
 // =====================================================
@@ -1394,9 +1404,9 @@ async function escalateToManager(
   );
 
   const message =
-`🔔 عميل يحتاج تواصل
+`${urgent ? '🔥 عميل جاهز للشراء' : '🔔 عميل يحتاج تواصل'}
 
-البوت ما قدر يجاوب على سؤال العميل.
+${urgent ? 'العميل طلب الحجز، تواصل معه بأسرع وقت.' : 'البوت ما قدر يجاوب على سؤال العميل.'}
 
 رقم العميل:
 +${phone}
@@ -1404,7 +1414,7 @@ async function escalateToManager(
 للتواصل معه مباشرة:
 https://wa.me/${phone}
 
-سؤاله:
+${urgent ? 'التفاصيل' : 'سؤاله'}:
 ${String(question || '').slice(0, 800)}`;
 
   const sent =
@@ -1685,6 +1695,52 @@ ${Object.keys(TEMPLATES).join('، ')}`
 }
 
 
+// إرسال قالب لمجموعة أرقام (يستخدمه أمر الواتساب والداشبورد)
+async function sendTemplateToNumbers(
+  template,
+  numbers
+) {
+
+  const sent = [];
+  const failed = [];
+
+  for (const number of numbers) {
+
+    const result =
+      await sendWhatsAppTemplate(
+        number,
+        template
+      );
+
+    if (result.ok) {
+
+      sent.push(number);
+
+      // نحفظ في محادثة العميل عشان البوت يعرف إنه وصله العرض
+      await saveConversation(
+        number,
+        'assistant',
+        template.logText ||
+          `[قالب مرسل: ${template.name}]`
+      );
+
+    } else {
+
+      failed.push(`${number} (${result.error})`);
+    }
+
+    // مهلة بسيطة بين كل رسالة
+    await new Promise((r) => setTimeout(r, 400));
+  }
+
+  console.log(
+    `📤 قالب ${template.name}: نجح ${sent.length} — فشل ${failed.length}`
+  );
+
+  return { sent, failed };
+}
+
+
 async function runAdminSendTemplate(
   adminPhone,
   command
@@ -1715,41 +1771,11 @@ async function runAdminSendTemplate(
     `⏳ جاري إرسال قالب "${command.templateKey}" إلى ${command.numbers.length} رقم...`
   );
 
-  const sent = [];
-  const failed = [];
-
-  for (const number of command.numbers) {
-
-    const result =
-      await sendWhatsAppTemplate(
-        number,
-        command.template
-      );
-
-    if (result.ok) {
-
-      sent.push(number);
-
-      // نحفظ في محادثة العميل عشان البوت يعرف إنه وصله العرض
-      await saveConversation(
-        number,
-        'assistant',
-        command.template.logText ||
-          `[قالب مرسل: ${command.template.name}]`
-      );
-
-    } else {
-
-      failed.push(`${number} (${result.error})`);
-    }
-
-    // مهلة بسيطة بين كل رسالة
-    await new Promise((r) => setTimeout(r, 400));
-  }
-
-  console.log(
-    `📤 قالب ${command.template.name}: نجح ${sent.length} — فشل ${failed.length}`
-  );
+  const { sent, failed } =
+    await sendTemplateToNumbers(
+      command.template,
+      command.numbers
+    );
 
   let summary =
 `✅ تم الإرسال: ${sent.length}
@@ -2796,6 +2822,21 @@ app.post(
 
 
 // =====================================================
+// الداشبورد
+// =====================================================
+
+registerDashboard(app, {
+  pool,
+  normalizePhone,
+  toInternationalSaudi,
+  TEMPLATES,
+  sendTemplateToNumbers,
+  createReportWorkbook,
+  password: DASHBOARD_PASSWORD,
+});
+
+
+// =====================================================
 // 404
 // =====================================================
 
@@ -2868,6 +2909,10 @@ async function startServer() {
 
         console.log(
           `Templates: ${Object.keys(TEMPLATES).join(', ')}`
+        );
+
+        console.log(
+          `Dashboard: ${DASHBOARD_PASSWORD ? 'enabled at /admin' : 'disabled - no password'}`
         );
       }
     );
