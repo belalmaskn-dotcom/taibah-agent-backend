@@ -888,11 +888,26 @@ const EXTRACTION_SYSTEM_PROMPT = `
     "min_area": null,
     "max_area": null
   },
-  "ready_to_search": false
+  "ready_to_search": false,
+  "needs_manager": false
 }
 
 purpose يكون "sale" أو "rent" أو null.
 keyword: كلمة مميزة واحدة يبحث عنها العميل داخل وصف العقار (مثل "مسبح" أو "مصعد" أو "الحرم")، أو null.
+
+=====================================================
+needs_manager (تحويل للمدير العام):
+
+خلّي needs_manager = true إذا:
+- العميل طلب يكلم المدير أو مسؤول أو شخص حقيقي.
+- العميل عنده شكوى أو مشكلة.
+- سؤال ما تقدر تجاوب عليه من البحث في العقارات (مثل: العمولة، العقود، الإجراءات القانونية، طلب خصم أو تفاوض جدي على السعر، عرض عقار يبي يبيعه عن طريقنا، شراكة أو توظيف).
+- أي سؤال ما تعرف جوابه بشكل أكيد.
+
+في هذه الحالة اكتب في reply رد قصير ولطيف إن طلبه وصل وراح يتواصل معه المسؤول.
+لا تكتب رقم المدير، الكود هو اللي يضيفه.
+
+غير كذا خلّي needs_manager = false.
 `;
 
 
@@ -936,7 +951,15 @@ const GROUNDED_REPLY_SYSTEM_PROMPT = `
 
 لا تقل إن العقار عليه رهن أو ليس عليه رهن إلا إذا كان مذكورًا في الوصف.
 لا تقل إن التمويل متاح أو غير متاح إلا إذا كان مذكورًا في الوصف.
-إذا مو مذكور قل: "المعلومة هذي مو متوفرة عندي حاليًا، وتقدر تتأكد منها مع الفريق 🌹"
+إذا مو مذكور قل: "المعلومة هذي مو متوفرة عندي حاليًا، وبنحوّل سؤالك للمسؤول 🌹"
+وابدأ ردك في هذه الحالة بالعلامة [MANAGER] (الكود يشيلها قبل ما توصل للعميل).
+
+=====================================================
+التحويل للمدير:
+
+إذا العميل سأل سؤال ما تقدر تجاوبه من النتائج اللي قدامك، أو طلب يكلم مسؤول، أو عنده شكوى:
+ابدأ ردك بالعلامة [MANAGER] ثم اكتب رد قصير إن سؤاله وصل وراح يتواصل معه المسؤول.
+لا تكتب رقم المدير، الكود هو اللي يضيفه.
 
 =====================================================
 الموقع:
@@ -1245,13 +1268,63 @@ function formatResultsForClaude(
 
 
 // =====================================================
-// إنشاء الرد الأساسي
+// علامة التحويل للمدير
 // =====================================================
 
-async function generateReply(
+const MANAGER_MARKER =
+  '[MANAGER]';
+
+function stripManagerMarker(
+  text = ''
+) {
+
+  const value =
+    String(text || '');
+
+  return {
+    text:
+      value
+        .split(MANAGER_MARKER)
+        .join('')
+        .trim(),
+
+    hasMarker:
+      value.includes(
+        MANAGER_MARKER
+      ),
+  };
+}
+
+
+// =====================================================
+// إنشاء الرد الأساسي (مع معرفة هل يحتاج تحويل للمدير)
+// يرجع: { reply, needsManager }
+// =====================================================
+
+async function generateReplyDetailed(
   history,
   userText
 ) {
+
+  const done = (
+    reply,
+    needsManager = false
+  ) => {
+
+    const cleaned =
+      stripManagerMarker(
+        reply
+      );
+
+    return {
+      reply:
+        cleaned.text,
+
+      needsManager:
+        needsManager ||
+        cleaned.hasMarker,
+    };
+  };
 
   try {
 
@@ -1261,7 +1334,7 @@ async function generateReply(
         userText
       )
     ) {
-      return DETAILS_REPLY;
+      return done(DETAILS_REPLY);
     }
 
     // تحويل الأرقام العربية (٥٠٠) إلى إنجليزية (500)
@@ -1287,7 +1360,7 @@ async function generateReply(
       );
 
     if (!rawExtraction) {
-      return 'ياهلا فيك 🌹 ممكن تعيد رسالتك مرة ثانية؟';
+      return done('ياهلا فيك 🌹 ممكن تعيد رسالتك مرة ثانية؟');
     }
 
     console.log(
@@ -1336,12 +1409,15 @@ async function generateReply(
     }
 
     if (!parsed) {
-      return rawExtraction.trim();
+      return done(rawExtraction.trim());
     }
+
+    const extractionNeedsManager =
+      parsed.needs_manager === true;
 
     // هل فيه أي معيار بحث فعلي؟ (نوع، سعر، حي، ...)
     // لو فيه، نبحث حتى لو Claude نسي يحط ready_to_search = true
-    const extractedCriteria =
+    const criteria =
       parsed.criteria &&
       typeof parsed.criteria ===
         'object'
@@ -1350,7 +1426,7 @@ async function generateReply(
 
     const hasCriteria =
       Object.values(
-        extractedCriteria
+        criteria
       ).some(
         (v) =>
           v !== null &&
@@ -1369,20 +1445,21 @@ async function generateReply(
           'string' &&
         parsed.reply.trim()
       ) {
-        return parsed.reply.trim();
+        return done(
+          parsed.reply.trim(),
+          extractionNeedsManager
+        );
       }
 
-      return 'ياهلا فيك 🌹 وش نوع العقار اللي تدور عليه؟';
+      return done(
+        extractionNeedsManager
+          ? 'وصلني طلبك 🌹 وبحوّله للمسؤول.'
+          : 'ياهلا فيك 🌹 وش نوع العقار اللي تدور عليه؟',
+        extractionNeedsManager
+      );
     }
 
     // 2) البحث في موقع طيبة
-    const criteria =
-      parsed.criteria &&
-      typeof parsed.criteria ===
-        'object'
-        ? parsed.criteria
-        : {};
-
     let matches = [];
 
     try {
@@ -1409,7 +1486,7 @@ async function generateReply(
         searchError.message
       );
 
-      return 'ما قدرت أوصل للعروض حاليًا 🌹 جرب مرة ثانية بعد شوي.';
+      return done('ما قدرت أوصل للعروض حاليًا 🌹 جرب مرة ثانية بعد شوي.');
     }
 
     const resultsContext =
@@ -1446,10 +1523,13 @@ ${resultsContext}
       !finalReply ||
       !String(finalReply).trim()
     ) {
-      return 'ما قدرت أوصل للنتيجة حاليًا 🌹 جرب مرة ثانية بعد شوي.';
+      return done('ما قدرت أوصل للنتيجة حاليًا 🌹 جرب مرة ثانية بعد شوي.');
     }
 
-    return finalReply.trim();
+    return done(
+      finalReply.trim(),
+      extractionNeedsManager
+    );
 
   } catch (err) {
 
@@ -1458,8 +1538,27 @@ ${resultsContext}
       err
     );
 
-    return 'ياهلا فيك 🌹 ممكن تعيد رسالتك مرة ثانية؟';
+    return done('ياهلا فيك 🌹 ممكن تعيد رسالتك مرة ثانية؟');
   }
+}
+
+
+// =====================================================
+// نسخة قديمة ترجع نص فقط (للتوافق مع أي كود قديم)
+// =====================================================
+
+async function generateReply(
+  history,
+  userText
+) {
+
+  const result =
+    await generateReplyDetailed(
+      history,
+      userText
+    );
+
+  return result.reply;
 }
 
 
@@ -1469,6 +1568,7 @@ ${resultsContext}
 
 module.exports = {
   generateReply,
+  generateReplyDetailed,
   generateStickerReply,
   isViewingRequest,
   extractViewingData,
