@@ -46,29 +46,12 @@ ${SITE_URL} 🏠`;
 function convertArabicDigits(text = '') {
 
   const arabicDigits = {
-    '٠': '0',
-    '١': '1',
-    '٢': '2',
-    '٣': '3',
-    '٤': '4',
-    '٥': '5',
-    '٦': '6',
-    '٧': '7',
-    '٨': '8',
-    '٩': '9',
+    '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4',
+    '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9',
 
-    '۰': '0',
-    '۱': '1',
-    '۲': '2',
-    '۳': '3',
-    '۴': '4',
-    '۵': '5',
-    '۶': '6',
-    '۷': '7',
-    '۸': '8',
-    '۹': '9',
+    '۰': '0', '۱': '1', '۲': '2', '۳': '3', '۴': '4',
+    '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9',
   };
-
 
   return String(text).replace(
     /[٠-٩۰-۹]/g,
@@ -92,27 +75,35 @@ function normalizeArabicText(
   )
     .trim()
     .toLowerCase()
-
     .replace(/[أإآ]/g, 'ا')
-
     .replace(/ى/g, 'ي')
-
-    .replace(
-      /[ًٌٍَُِّْ]/g,
-      ''
-    )
-
-    .replace(
-      /[؟?!.,،]/g,
-      ' '
-    )
-
-    .replace(
-      /\s+/g,
-      ' '
-    )
-
+    .replace(/[ًٌٍَُِّْ]/g, '')
+    .replace(/[؟?!.,،]/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
+}
+
+
+// =====================================================
+// دالة مساعدة: هل النص يحتوي على أي عبارة من القائمة
+// =====================================================
+
+function containsAnyPhrase(
+  text = '',
+  phrases = []
+) {
+
+  const t =
+    normalizeArabicText(text);
+
+  return phrases.some(
+    (phrase) =>
+      t.includes(
+        normalizeArabicText(
+          phrase
+        )
+      )
+  );
 }
 
 
@@ -124,42 +115,18 @@ function customerAskedForMoreDetails(
   text = ''
 ) {
 
-  const t =
-    normalizeArabicText(text);
-
-
-  const phrases = [
-
+  return containsAnyPhrase(text, [
     'ممكن تفاصيل اكثر',
-
     'تفاصيل اكثر',
-
     'ابي تفاصيل اكثر',
-
     'ابغى تفاصيل اكثر',
-
     'اريد تفاصيل اكثر',
-
     'ودي بتفاصيل اكثر',
-
     'more details',
-
     'send me more details',
-
     'i need more details',
-
     'need more details',
-  ];
-
-
-  return phrases.some(
-    (phrase) =>
-      t.includes(
-        normalizeArabicText(
-          phrase
-        )
-      )
-  );
+  ]);
 }
 
 
@@ -171,48 +138,21 @@ function customerAskedAboutFinance(
   text = ''
 ) {
 
-  const t =
-    normalizeArabicText(text);
-
-
-  const phrases = [
-
+  return containsAnyPhrase(text, [
     'في تمويل',
-
     'فيه تمويل',
-
     'هل في تمويل',
-
     'هل فيه تمويل',
-
     'يقبل تمويل',
-
     'يقبل التمويل',
-
     'عن طريق البنك',
-
     'تمويل بنكي',
-
     'التمويل',
-
     'finance',
-
     'financing',
-
     'bank finance',
-
     'bank financing',
-  ];
-
-
-  return phrases.some(
-    (phrase) =>
-      t.includes(
-        normalizeArabicText(
-          phrase
-        )
-      )
-  );
+  ]);
 }
 
 
@@ -224,44 +164,19 @@ function customerAskedAboutMortgage(
   text = ''
 ) {
 
-  const t =
-    normalizeArabicText(text);
-
-
-  const phrases = [
-
+  return containsAnyPhrase(text, [
     'عليه رهن',
-
     'عليها رهن',
-
     'هل عليه رهن',
-
     'هل عليها رهن',
-
     'العقار مرهون',
-
     'مرهون',
-
     'مرهونة',
-
     'فيه رهن',
-
     'في رهن',
-
     'mortgage',
-
     'mortgaged',
-  ];
-
-
-  return phrases.some(
-    (phrase) =>
-      t.includes(
-        normalizeArabicText(
-          phrase
-        )
-      )
-  );
+  ]);
 }
 
 
@@ -273,48 +188,21 @@ function customerAskedAboutRent(
   text = ''
 ) {
 
-  const t =
-    normalizeArabicText(text);
-
-
-  const phrases = [
-
+  return containsAnyPhrase(text, [
     'في ايجار',
-
     'فيه ايجار',
-
     'عندكم ايجار',
-
     'عندكم للايجار',
-
     'ابي ايجار',
-
     'ابغى ايجار',
-
     'عقار للايجار',
-
     'عقارات للايجار',
-
     'for rent',
-
     'rent',
-
     'rental',
-
     'i want to rent',
-
     'property for rent',
-  ];
-
-
-  return phrases.some(
-    (phrase) =>
-      t.includes(
-        normalizeArabicText(
-          phrase
-        )
-      )
-  );
+  ]);
 }
 
 
@@ -326,159 +214,80 @@ function isViewingRequest(
   text = ''
 ) {
 
-  const t =
-    normalizeArabicText(text);
-
-
-  const phrases = [
-
+  return containsAnyPhrase(text, [
     'اوقف على العقار',
-
     'اوقف عالعقار',
-
     'اوقف عليه',
-
     'اوقف عليها',
-
     'اوقف على الشقه',
-
     'اوقف على الشقة',
-
     'اوقف على الفيلا',
-
     'اوقف على العماره',
-
     'اوقف على العمارة',
-
     'ابي اوقف',
-
     'ابغى اوقف',
-
     'ودي اوقف',
-
     'محتاج اوقف',
-
     'احتاج اوقف',
-
     'عايز اوقف',
-
     'عاوز اوقف',
-
     'ابي اشوف العقار',
-
     'ابغى اشوف العقار',
-
     'محتاج اشوف العقار',
-
     'احتاج اشوف العقار',
-
     'عايز اشوف العقار',
-
     'اشوف العقار',
-
     'اشوفها',
-
     'اشوفه',
-
     'ابي اعاين',
-
     'ابغى اعاين',
-
     'محتاج اعاين',
-
     'احتاج اعاين',
-
     'عايز اعاين',
-
     'اعاين العقار',
-
     'اعاينها',
-
     'اعاينه',
-
     'معاينه',
-
     'معاينة',
-
     'موعد معاينه',
-
     'موعد معاينة',
-
     'احجز معاينه',
-
     'احجز معاينة',
-
     'احجز موعد',
-
     'ابي موعد',
-
     'ابغى موعد',
-
     'محتاج موعد',
-
     'احتاج موعد',
-
     'موعد للوقوف',
-
     'موعد للمعاينه',
-
     'موعد للمعاينة',
-
     'ابي ازور العقار',
-
     'ابغى ازور العقار',
-
     'محتاج ازور العقار',
-
     'احتاج ازور العقار',
-
     'زيارة العقار',
-
     'زياره العقار',
 
     // English
-
     'view the property',
-
     'see the property',
-
     'visit the property',
-
     'property viewing',
-
     'book a viewing',
-
     'schedule a viewing',
-
     'book an appointment',
-
     'schedule an appointment',
-
     'want to see it',
-
     'want to view it',
-
     'want to visit it',
-
     'can i see it',
-
     'can i view it',
-  ];
-
-
-  return phrases.some(
-    (phrase) =>
-      t.includes(
-        normalizeArabicText(
-          phrase
-        )
-      )
-  );
+  ]);
 }
 
 
 // =====================================================
-// الأرقام المكتوبة بالكلمات
+// الأرقام المكتوبة بالكلمات (للساعة)
 // =====================================================
 
 function extractWrittenHour(
@@ -491,145 +300,30 @@ function extractWrittenHour(
 
   const hourWords = [
 
-    {
-      hour: 1,
-      words: [
-        'واحد',
-        'وحدة',
-        'الواحده',
-        'الواحدة',
-        'one',
-      ],
-    },
-
-    {
-      hour: 2,
-      words: [
-        'اثنين',
-        'اثنتين',
-        'الثانيه',
-        'الثانية',
-        'two',
-      ],
-    },
-
-    {
-      hour: 3,
-      words: [
-        'ثلاثه',
-        'ثلاثة',
-        'الثالثه',
-        'الثالثة',
-        'three',
-      ],
-    },
-
-    {
-      hour: 4,
-      words: [
-        'اربعه',
-        'اربعة',
-        'الرابعه',
-        'الرابعة',
-        'four',
-      ],
-    },
-
-    {
-      hour: 5,
-      words: [
-        'خمسه',
-        'خمسة',
-        'خامسه',
-        'خامسة',
-        'الخامسه',
-        'الخامسة',
-        'five',
-      ],
-    },
-
-    {
-      hour: 6,
-      words: [
-        'سته',
-        'ستة',
-        'السادسه',
-        'السادسة',
-        'six',
-      ],
-    },
-
-    {
-      hour: 7,
-      words: [
-        'سبعه',
-        'سبعة',
-        'السابعه',
-        'السابعة',
-        'seven',
-      ],
-    },
-
-    {
-      hour: 8,
-      words: [
-        'ثمانيه',
-        'ثمانية',
-        'الثامنه',
-        'الثامنة',
-        'eight',
-      ],
-    },
-
-    {
-      hour: 9,
-      words: [
-        'تسعه',
-        'تسعة',
-        'التاسعه',
-        'التاسعة',
-        'nine',
-      ],
-    },
-
-    {
-      hour: 10,
-      words: [
-        'عشره',
-        'عشرة',
-        'العاشره',
-        'العاشرة',
-        'ten',
-      ],
-    },
-
-    {
-      hour: 11,
-      words: [
-        'احد عشر',
-        'احدى عشر',
-        'الحاديه عشر',
-        'الحادية عشر',
-        'eleven',
-      ],
-    },
-
-    {
-      hour: 12,
-      words: [
-        'اثنا عشر',
-        'اثني عشر',
-        'الثانيه عشر',
-        'الثانية عشر',
-        'twelve',
-      ],
-    },
+    { hour: 1,  words: ['واحد', 'وحدة', 'الواحده', 'الواحدة', 'one'] },
+    { hour: 2,  words: ['اثنين', 'اثنتين', 'الثانيه', 'الثانية', 'two'] },
+    { hour: 3,  words: ['ثلاثه', 'ثلاثة', 'الثالثه', 'الثالثة', 'three'] },
+    { hour: 4,  words: ['اربعه', 'اربعة', 'الرابعه', 'الرابعة', 'four'] },
+    { hour: 5,  words: ['خمسه', 'خمسة', 'خامسه', 'خامسة', 'الخامسه', 'الخامسة', 'five'] },
+    { hour: 6,  words: ['سته', 'ستة', 'السادسه', 'السادسة', 'six'] },
+    { hour: 7,  words: ['سبعه', 'سبعة', 'السابعه', 'السابعة', 'seven'] },
+    { hour: 8,  words: ['ثمانيه', 'ثمانية', 'الثامنه', 'الثامنة', 'eight'] },
+    { hour: 9,  words: ['تسعه', 'تسعة', 'التاسعه', 'التاسعة', 'nine'] },
+    { hour: 10, words: ['عشره', 'عشرة', 'العاشره', 'العاشرة', 'ten'] },
+    { hour: 11, words: ['احد عشر', 'احدى عشر', 'الحاديه عشر', 'الحادية عشر', 'eleven'] },
+    { hour: 12, words: ['اثنا عشر', 'اثني عشر', 'الثانيه عشر', 'الثانية عشر', 'twelve'] },
   ];
+
+
+  // نبدأ من 12 نزولًا إلى 1
+  // عشان "الثانية عشر" ما تنقرأ غلط على إنها "الثانية"
+  const ordered =
+    [...hourWords].reverse();
 
 
   for (
     const item
-    of hourWords
+    of ordered
   ) {
 
     for (
@@ -637,13 +331,25 @@ function extractWrittenHour(
       of item.words
     ) {
 
-      if (
-        t.includes(
-          normalizeArabicText(
-            word
-          )
-        )
-      ) {
+      const w =
+        normalizeArabicText(
+          word
+        );
+
+
+      // الكلمات الإنجليزية لازم تكون كلمة مستقلة
+      // عشان كلمة مثل "someone" ما تنقرأ "one"
+      const isEnglish =
+        /^[a-z ]+$/.test(w);
+
+
+      const found =
+        isEnglish
+          ? new RegExp(`\\b${w}\\b`).test(t)
+          : t.includes(w);
+
+
+      if (found) {
 
         return String(
           item.hour
@@ -692,6 +398,9 @@ function extractViewingTime(
     /\bat\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i,
 
     /\b(\d{1,2}):(\d{2})\s*(am|pm|صباحا|صباح|مساء|العصر|الظهر|المغرب|الليل|م|ص)?\b/i,
+
+    // 5 مساء / 5 العصر / 5pm (بدون كلمة الساعة)
+    /\b(\d{1,2})\s*(صباحا|صباح|مساء|العصر|الظهر|المغرب|الليل|am|pm)/i,
   ];
 
 
@@ -728,76 +437,41 @@ function extractViewingTime(
 
     let suffix = '';
 
-
     if (
-      normalized.includes(
-        'مساء'
-      ) ||
-      normalized.includes(
-        'pm'
-      )
+      normalized.includes('مساء') ||
+      normalized.includes('pm')
     ) {
-
       suffix = ' مساء';
     }
 
-
     else if (
-      normalized.includes(
-        'صباح'
-      ) ||
-      normalized.includes(
-        'am'
-      )
+      normalized.includes('صباح') ||
+      normalized.includes('am')
     ) {
-
       suffix = ' صباح';
     }
 
-
-    else if (
-      normalized.includes(
-        'العصر'
-      )
-    ) {
-
+    else if (normalized.includes('العصر')) {
       suffix = ' العصر';
     }
 
-
-    else if (
-      normalized.includes(
-        'الظهر'
-      )
-    ) {
-
+    else if (normalized.includes('الظهر')) {
       suffix = ' الظهر';
     }
 
-
-    else if (
-      normalized.includes(
-        'المغرب'
-      )
-    ) {
-
+    else if (normalized.includes('المغرب')) {
       suffix = ' المغرب';
     }
 
-
-    else if (
-      normalized.includes(
-        'الليل'
-      )
-    ) {
-
+    else if (normalized.includes('الليل')) {
       suffix = ' الليل';
     }
 
-
     return `${writtenHour}${suffix}`;
   }
-    // -----------------------------------------------
+
+
+  // -----------------------------------------------
   // لو البوت سأل عن الساعة
   // والعميل رد فقط:
   //
@@ -818,12 +492,10 @@ function extractViewingTime(
         onlyNumber[1]
       );
 
-
     if (
       hour >= 1 &&
       hour <= 24
     ) {
-
       return normalized;
     }
   }
@@ -869,40 +541,24 @@ function extractViewingData(
   // -----------------------------------------------
 
   const buyerPhrases = [
-
     'انا المشتري',
-
     'مشتري',
-
     'المشتري',
-
     'مشتري مباشر',
-
     'انا شاري',
-
     'شاري',
-
     'buyer',
-
     'i am the buyer',
-
     "i'm the buyer",
-
     'direct buyer',
   ];
 
-
   if (
-    buyerPhrases.some(
-      (phrase) =>
-        text.includes(
-          normalizeArabicText(
-            phrase
-          )
-        )
+    containsAnyPhrase(
+      text,
+      buyerPhrases
     )
   ) {
-
     customerType =
       'مشتري';
   }
@@ -913,42 +569,25 @@ function extractViewingData(
   // -----------------------------------------------
 
   const officePhrases = [
-
     'انا مكتب',
-
     'مكتب عقار',
-
     'مكتب عقاري',
-
     'وسيط',
-
     'مسوق عقاري',
-
     'real estate office',
-
     'real estate agent',
-
     'broker',
-
     'agent',
-
     'i am an agent',
-
     "i'm an agent",
   ];
 
-
   if (
-    officePhrases.some(
-      (phrase) =>
-        text.includes(
-          normalizeArabicText(
-            phrase
-          )
-        )
+    containsAnyPhrase(
+      text,
+      officePhrases
     )
   ) {
-
     customerType =
       'مكتب';
   }
@@ -963,63 +602,35 @@ function extractViewingData(
 
 
   const dayPatterns = [
-
     'اليوم',
-
     'بكره',
-
     'بكرة',
-
     'غدا',
-
     'غداً',
-
     'السبت',
-
     'الاحد',
-
     'الأحد',
-
     'الاثنين',
-
     'الإثنين',
-
     'الثلاثاء',
-
     'الثلاثا',
-
     'الاربعاء',
-
     'الأربعاء',
-
     'الاربع',
-
     'الأربع',
-
     'الخميس',
-
     'الجمعه',
-
     'الجمعة',
 
     // English
-
     'today',
-
     'tomorrow',
-
     'saturday',
-
     'sunday',
-
     'monday',
-
     'tuesday',
-
     'wednesday',
-
     'thursday',
-
     'friday',
   ];
 
@@ -1084,11 +695,8 @@ function extractViewingData(
 
 
   return {
-
     day,
-
     time,
-
     customerType,
   };
 }
@@ -1114,7 +722,6 @@ function viewingFlowIsActive(
     userText
   );
 }
-
 
 
 // =====================================================
@@ -1205,14 +812,51 @@ const EXTRACTION_SYSTEM_PROMPT = `
 فيلا، شقة، دور، أرض، أرض خام، أرض تجارية، عمارة، عمارة تجارية، استراحة، مزرعة، قصر، فندق، محطة وقود.
 
 =====================================================
+فهم الأرقام (مهم جدًا):
+
+العميل ممكن يكتب الأرقام بأي شكل، ولازم تفهمها كلها وتحولها لأرقام:
+- أرقام إنجليزية: 500000
+- أرقام عربية: ٥٠٠٠٠٠ (نفس 500000)
+- بالحروف: "خمسمية ألف" أو "خمسمائة ألف"
+- مختلط: "٥٠٠ ألف" أو "500 الف" أو "نص مليون"
+- بالإنجليزي: "half a million" أو "2 million" أو "500k"
+
+انتبه للهجات:
+"مية / ميه / مائة" = 100
+"ميتين / مئتين / مائتين" = 200
+"تلات / ثلاث" = 3
+"تمن / ثمان" = 8
+"نص" = نصف، "ربع" = ربع
+
+=====================================================
 تحويل السعر:
 
 "500 ألف" أو "ميزانيتي 500 ألف" أو "ما يتجاوز 500 ألف" ← max_price = 500000
 "من 500 إلى 700 ألف" ← min_price = 500000 و max_price = 700000
+"نص مليون" ← 500000
 "مليون" ← 1000000
 "مليون ونص" ← 1500000
+"مليون وربع" ← 1250000
+"مليونين" ← 2000000
+"ثلاث ملايين" أو "٣ مليون" ← 3000000
+"سبعمية وخمسين ألف" ← 750000
+"ميتين ألف" ← 200000
+"تحت المليون" ← max_price = 1000000
+"فوق المليونين" ← min_price = 2000000
 
-اكتب الأرقام كأرقام وليس نصوصًا.
+=====================================================
+تحويل المساحة:
+
+"ستمية متر" أو "٦٠٠ م" ← 600
+"ألف متر" ← 1000
+"من 300 إلى 500 متر" ← min_area = 300 و max_area = 500
+
+=====================================================
+رقم العرض:
+
+"عرض رقم مية وخمسة" أو "العرض ١٠٥" أو "عرض 105" ← offer_no = 105
+
+اكتب الأرقام في JSON كأرقام وليس نصوصًا.
 
 =====================================================
 ممنوع في reply:
@@ -1400,21 +1044,14 @@ function tryParseClaudeResponse(
     !rawText ||
     typeof rawText !== 'string'
   ) {
-
     return null;
   }
 
 
   let cleaned =
     rawText
-      .replace(
-        /```json/gi,
-        ''
-      )
-      .replace(
-        /```/g,
-        ''
-      )
+      .replace(/```json/gi, '')
+      .replace(/```/g, '')
       .trim();
 
 
@@ -1432,7 +1069,6 @@ function tryParseClaudeResponse(
   const firstBrace =
     cleaned.indexOf('{');
 
-
   const lastBrace =
     cleaned.lastIndexOf('}');
 
@@ -1440,8 +1076,7 @@ function tryParseClaudeResponse(
   if (
     firstBrace !== -1 &&
     lastBrace !== -1 &&
-    lastBrace >
-      firstBrace
+    lastBrace > firstBrace
   ) {
 
     const possibleJson =
@@ -1449,7 +1084,6 @@ function tryParseClaudeResponse(
         firstBrace,
         lastBrace + 1
       );
-
 
     try {
 
@@ -1465,7 +1099,6 @@ function tryParseClaudeResponse(
 
   return null;
 }
-
 
 
 // =====================================================
@@ -1623,11 +1256,18 @@ async function generateReply(
       return DETAILS_REPLY;
     }
 
+    // تحويل الأرقام العربية (٥٠٠) إلى إنجليزية (500)
+    // قبل ما تروح الرسالة لعقل البوت
+    const cleanUserText =
+      convertArabicDigits(
+        userText
+      );
+
     const messages = [
       ...history,
       {
         role: 'user',
-        content: userText,
+        content: cleanUserText,
       },
     ];
 
