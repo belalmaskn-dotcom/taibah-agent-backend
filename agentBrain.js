@@ -802,7 +802,15 @@ const EXTRACTION_SYSTEM_PROMPT = `
 
 3) إذا ذكر العميل رقم عرض مباشرة (مثل: "عرض رقم 105") ← offer_no = 105.
 
+4) إذا العميل رد برقم فقط (مثل "750" أو "٧٥٠" أو "مليون") بعد كلام عن عقار أو ميزانية:
+اعتبره ميزانية، وكمّل بنفس نوع العقار المذكور قبل في المحادثة، وابحث مباشرة.
+مثال: العميل قال "عندكم أرض؟" ثم "750" ← property_type = "أرض" و max_price = 750000.
+إذا الرقم صغير ومعه "ألف" (مثل "750 ألف") ← 750000.
+
 لا تشترط أن يذكر العميل كل المعايير.
+
+ممنوع تكتب في reply كلام مثل "بنبحث لك" أو "جاري البحث" أو "خلني أشوف".
+إذا فيه أي معيار بحث، لازم ready_to_search = true، والكود هو اللي يبحث ويرد بالنتائج.
 
 لا تبحث (ready_to_search = false) إذا كانت الرسالة تحية أو شكر أو سؤال عام ليس عن عقار.
 في هذه الحالة اكتب ردًا طبيعيًا قصيرًا في reply، ويمكنك سؤال العميل وش نوع العقار اللي يبحث عنه.
@@ -1291,9 +1299,29 @@ async function generateReply(
       return rawExtraction.trim();
     }
 
+    // هل فيه أي معيار بحث فعلي؟ (نوع، سعر، حي، ...)
+    // لو فيه، نبحث حتى لو Claude نسي يحط ready_to_search = true
+    const extractedCriteria =
+      parsed.criteria &&
+      typeof parsed.criteria ===
+        'object'
+        ? parsed.criteria
+        : {};
+
+    const hasCriteria =
+      Object.values(
+        extractedCriteria
+      ).some(
+        (v) =>
+          v !== null &&
+          v !== undefined &&
+          String(v).trim() !== ''
+      );
+
     if (
       parsed.ready_to_search !==
-      true
+        true &&
+      !hasCriteria
     ) {
 
       if (
