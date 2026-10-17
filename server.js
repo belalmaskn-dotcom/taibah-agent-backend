@@ -378,6 +378,151 @@ function isAdminPhone(
 
 
 // =====================================================
+// تتبع حالة التسليم (وصلت / فشلت / اتقرأت)
+// واتساب يرد "تم" لما يقبل الطلب، وبعدها يبعت حالة الرسالة
+// الفعلية على الويب هوك. هنا نسجّلها في اللوجات.
+// =====================================================
+
+// رسائل القوالب اللي أرسلناها (نتابع كل حالاتها)
+// المفتاح: رقم الرسالة عند واتساب (wamid)
+const trackedMessages =
+  new Map();
+
+const MAX_TRACKED_MESSAGES = 2000;
+
+
+function trackMessage(
+  id,
+  to,
+  templateName
+) {
+
+  if (!id) {
+    return;
+  }
+
+  trackedMessages.set(
+    id,
+    {
+      to,
+      template: templateName,
+      at: Date.now(),
+    }
+  );
+
+  // نحافظ على حجم الذاكرة: نحذف أقدم رسالة لو زاد العدد
+  if (trackedMessages.size > MAX_TRACKED_MESSAGES) {
+
+    const oldest =
+      trackedMessages.keys().next().value;
+
+    trackedMessages.delete(oldest);
+  }
+}
+
+
+// تفسير أشهر أكواد الفشل (للمساعدة فقط، والكود الأصلي يظهر دائمًا)
+const FAILURE_HINTS = {
+  131026: 'غالبًا الرقم ليس على واتساب، أو لم يقبل شروط واتساب، أو تطبيقه قديم.',
+  131042: 'غالبًا مشكلة في وسيلة الدفع أو أهلية الحساب. راجع وسيلة الدفع في Meta Business.',
+  131049: 'واتساب قرر عدم التسليم للحفاظ على جودة التجربة (غالبًا حد رسائل التسويق لهذا العميل).',
+  130472: 'رقم العميل ضمن تجربة من واتساب تمنع وصول رسائل التسويق إليه.',
+  131047: 'مرّت أكثر من 24 ساعة على آخر رسالة من هذا الرقم، فالرسالة العادية لا تصل (يلزم قالب).',
+  131048: 'تجاوز حد الرسائل المصنّفة كسبام.',
+  131056: 'تجاوز الحد المسموح للمراسلة بين الرقمين في وقت قصير.',
+  131053: 'مشكلة في تحميل الوسائط (فيديو أو صورة). تحقق من الرابط والحجم والصيغة.',
+  132001: 'القالب غير موجود بهذا الاسم أو اللغة.',
+  132012: 'متغيرات القالب لا تطابق ما تم إرساله.',
+  132015: 'القالب موقوف مؤقتًا بسبب انخفاض الجودة.',
+  132016: 'القالب معطّل.',
+  133010: 'رقم واتساب الخاص بالبوت غير مسجّل.',
+};
+
+
+function handleStatusUpdate(
+  status
+) {
+
+  if (!status) {
+    return;
+  }
+
+  const tracked =
+    trackedMessages.get(
+      status.id
+    );
+
+  const failed =
+    status.status === 'failed';
+
+  // الرسائل العادية (ردود البوت): نسجّل فشلها فقط، عشان اللوجات ما تزدحم
+  if (!failed && !tracked) {
+    return;
+  }
+
+  const who =
+    status.recipient_id ||
+    tracked?.to ||
+    'غير معروف';
+
+  const templateLabel =
+    tracked
+      ? ` (قالب ${tracked.template})`
+      : '';
+
+  if (failed) {
+
+    const err =
+      (status.errors && status.errors[0]) ||
+      {};
+
+    const detail =
+      err.error_data?.details ||
+      err.message ||
+      err.title ||
+      '';
+
+    console.error(
+      `❌ فشل التسليم إلى ${who}${templateLabel} — الكود ${err.code ?? 'غير معروف'}: ${err.title || ''} ${detail}`.trim()
+    );
+
+    const hint =
+      FAILURE_HINTS[err.code];
+
+    if (hint) {
+      console.error(
+        `   ↳ السبب المحتمل: ${hint}`
+      );
+    }
+
+    console.error(
+      '   التفاصيل الكاملة:',
+      JSON.stringify(
+        status.errors || status
+      )
+    );
+
+    return;
+  }
+
+  const labels = {
+    sent: '📤 واتساب أرسلها',
+    delivered: '✅ وصلت لجهاز العميل',
+    read: '👁️ العميل قرأها',
+  };
+
+  const category =
+    status.pricing?.category
+      ? ` — تصنيف: ${status.pricing.category}`
+      : '';
+
+  console.log(
+    `${labels[status.status] || status.status}: ${who}${templateLabel}${category}`
+  );
+}
+
+
+// =====================================================
 // إرسال رسالة نصية
 // =====================================================
 
@@ -1533,35 +1678,47 @@ async function sendWhatsAppTemplate(
 
   try {
 
-    await axios.post(
+    const response =
+      await axios.post(
 
-      `https://graph.facebook.com/v23.0/${PHONE_NUMBER_ID}/messages`,
+        `https://graph.facebook.com/v23.0/${PHONE_NUMBER_ID}/messages`,
 
-      {
-        messaging_product: 'whatsapp',
-        to: normalizePhone(to),
-        type: 'template',
-        template: {
-          name: template.name,
-          language: {
-            code: template.language,
+        {
+          messaging_product: 'whatsapp',
+          to: normalizePhone(to),
+          type: 'template',
+          template: {
+            name: template.name,
+            language: {
+              code: template.language,
+            },
+            components,
           },
-          components,
         },
-      },
 
-      {
-        headers: {
-          Authorization:
-            `Bearer ${WHATSAPP_TOKEN}`,
-          'Content-Type':
-            'application/json',
-        },
-        timeout: 30000,
-      }
+        {
+          headers: {
+            Authorization:
+              `Bearer ${WHATSAPP_TOKEN}`,
+            'Content-Type':
+              'application/json',
+          },
+          timeout: 30000,
+        }
+      );
+
+    // رقم الرسالة عند واتساب (نتابع حالتها لاحقًا على الويب هوك)
+    const messageId =
+      response?.data?.messages?.[0]?.id ||
+      null;
+
+    trackMessage(
+      messageId,
+      normalizePhone(to),
+      template.name
     );
 
-    return { ok: true };
+    return { ok: true, id: messageId };
 
   } catch (err) {
 
@@ -2786,13 +2943,34 @@ app.post(
           const value =
             change.value;
 
+          // حالات التسليم (أُرسلت / وصلت / قُرئت / فشلت)
+          const statuses =
+            value?.statuses ||
+            [];
+
+          for (const status of statuses) {
+
+            try {
+
+              handleStatusUpdate(
+                status
+              );
+
+            } catch (statusError) {
+
+              console.error(
+                'Handle status update error:',
+                statusError
+              );
+            }
+          }
+
           const messages =
             value?.messages ||
             [];
 
           for (const message of messages) {
 
-            // Status updates لا تدخل هنا لأنها ليست داخل messages.
             try {
 
               await processCustomerMessage(
@@ -2913,6 +3091,10 @@ async function startServer() {
 
         console.log(
           `Dashboard: ${DASHBOARD_PASSWORD ? 'enabled at /admin' : 'disabled - no password'}`
+        );
+
+        console.log(
+          'Delivery status tracking: enabled'
         );
       }
     );
