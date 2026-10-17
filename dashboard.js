@@ -516,7 +516,7 @@ function registerDashboard(app, deps) {
     } catch (err) {
 
       console.error('Dashboard export error:', err);
-      res.status(500).send('تعذر إنشاء الملف');
+      res.status(500).send('تعذّر إنشاء الملف');
     }
   });
 }
@@ -534,7 +534,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 <title>لوحة بوت استثمارات طيبة</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600&family=Reem+Kufi:wght@500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
     --limestone: #F2F3EF;
@@ -556,9 +556,9 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     margin: 0;
     background: var(--limestone);
     color: var(--ink);
-    font-family: "IBM Plex Sans Arabic", Tahoma, Arial, sans-serif;
+    font-family: "Cairo", Tahoma, Arial, sans-serif;
     font-size: 15px;
-    line-height: 1.6;
+    line-height: 1.7;
   }
 
   button, input, select, textarea {
@@ -574,10 +574,10 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   }
 
   h1, h2, h3 {
-    font-family: "Reem Kufi", "IBM Plex Sans Arabic", sans-serif;
+    font-family: "Cairo", sans-serif;
     font-weight: 700;
     margin: 0;
-    line-height: 1.3;
+    line-height: 1.4;
   }
 
   .ltr { direction: ltr; unicode-bidi: embed; display: inline-block; }
@@ -656,15 +656,16 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   }
 
   .brand {
-    font-family: "Reem Kufi", sans-serif;
+    font-family: "Cairo", sans-serif;
+    font-weight: 700;
     font-size: 21px;
-    line-height: 1.35;
+    line-height: 1.4;
     margin-bottom: 4px;
   }
 
   .brand small {
     display: block;
-    font-family: "IBM Plex Sans Arabic", sans-serif;
+    font-family: "Cairo", sans-serif;
     font-size: 13px;
     color: #C9DDD2;
     font-weight: 400;
@@ -767,10 +768,11 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
   .ledger b {
     display: block;
-    font-family: "Reem Kufi", sans-serif;
+    font-family: "Cairo", sans-serif;
+    font-weight: 700;
     font-size: 30px;
     color: var(--palm);
-    line-height: 1.2;
+    line-height: 1.3;
   }
 
   .ledger span { color: var(--muted); font-size: 14px; }
@@ -1112,8 +1114,8 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
         <div class="ledger" id="ledger"></div>
 
         <div class="hotlist">
-          <h3>عملاء جاهزين للشراء</h3>
-          <p>ضغطوا "احجز شراء". تواصل معهم أول بأول.</p>
+          <h3>عملاء جاهزون للشراء</h3>
+          <p>ضغطوا على «احجز شراء»، فتواصل معهم أولًا بأول.</p>
           <div id="hotTable"></div>
         </div>
       </section>
@@ -1123,11 +1125,11 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
         <div class="page-head">
           <div>
             <h2>العملاء</h2>
-            <p>اضغط على أي عميل عشان تشوف محادثته كاملة.</p>
+            <p>اضغط على أي عميل لعرض محادثته كاملة.</p>
           </div>
         </div>
         <div class="toolbar">
-          <input class="field" id="search" type="search" placeholder="ابحث برقم أو بكلمة من المحادثة">
+          <input class="field" id="search" type="search" placeholder="ابحث برقم الهاتف أو بكلمة من المحادثة">
         </div>
         <div class="panel" id="customersTable"></div>
       </section>
@@ -1137,7 +1139,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
         <div class="page-head">
           <div>
             <h2>طلبات المدير</h2>
-            <p>أسئلة ما قدر البوت يجاوبها، وعملاء طلبوا الشراء.</p>
+            <p>أسئلة لم يستطع البوت الإجابة عنها، وعملاء طلبوا الشراء.</p>
           </div>
         </div>
         <div class="panel" id="escalationsTable"></div>
@@ -1148,7 +1150,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
         <div class="page-head">
           <div>
             <h2>طلبات المعاينة</h2>
-            <p>المواعيد اللي سجلها العملاء مع البوت.</p>
+            <p>المواعيد التي سجّلها العملاء عبر البوت.</p>
           </div>
         </div>
         <div class="panel" id="viewingsTable"></div>
@@ -1159,11 +1161,11 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
         <div class="page-head">
           <div>
             <h2>إرسال قالب</h2>
-            <p>الرسالة توصل للعميل حتى لو ما راسلنا قبل.</p>
+            <p>تصل الرسالة إلى العميل حتى لو لم يراسلنا من قبل.</p>
           </div>
         </div>
 
-        <div class="notice">رسائل العروض تُحسب من Meta كرسائل تسويقية بتكلفة على كل رسالة. أرسلها للعملاء المهتمين فقط.</div>
+        <div class="notice">تُحتسب رسائل العروض لدى Meta كرسائل تسويقية بتكلفة على كل رسالة، فأرسلها إلى العملاء المهتمين فقط.</div>
 
         <div class="send-grid">
           <div class="card">
@@ -1172,7 +1174,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
             <label class="lbl" for="numbers">أرقام العملاء</label>
             <textarea class="field" id="numbers" placeholder="0551234567&#10;0559876543"></textarea>
-            <div class="hint" id="numbersHint">كل رقم في سطر. حتى 200 رقم.</div>
+            <div class="hint" id="numbersHint">اكتب كل رقم في سطر مستقل، بحد أقصى 200 رقم.</div>
 
             <div class="row-actions">
               <button class="btn" id="sendBtn">إرسال القالب</button>
@@ -1183,7 +1185,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
           </div>
 
           <div class="card">
-            <h3>شكل الرسالة</h3>
+            <h3>معاينة الرسالة</h3>
             <div class="preview" id="tplPreview"></div>
             <div class="hint" id="tplVideo"></div>
           </div>
@@ -1278,7 +1280,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
       $('#password').value = '';
       showApp();
     } else if (res.status === 429) {
-      $('#loginError').textContent = 'محاولات كثيرة. جرّب بعد 15 دقيقة.';
+      $('#loginError').textContent = 'محاولات كثيرة. حاول مرة أخرى بعد 15 دقيقة.';
     } else {
       $('#loginError').textContent = 'كلمة السر غير صحيحة.';
     }
@@ -1315,9 +1317,9 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
       ['عملاء راسلوا البوت', s.customers, ''],
       ['عملاء اليوم', s.activeToday, ''],
       ['رسائل اليوم', s.messagesToday, ''],
-      ['طلبات معاينة', s.viewings, ''],
-      ['تحويلات للمدير', s.escalations, ''],
-      ['جاهزين للشراء', s.hotLeads, 'is-hot'],
+      ['طلبات المعاينة', s.viewings, ''],
+      ['التحويلات إلى المدير', s.escalations, ''],
+      ['جاهزون للشراء', s.hotLeads, 'is-hot'],
     ];
 
     $('#ledger').innerHTML = cells
@@ -1328,7 +1330,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   function tags(c) {
     let t = '';
     if (c.hot) t += '<span class="tag hot">احجز شراء</span>';
-    else if (c.escalated) t += '<span class="tag esc">حُوّل للمدير</span>';
+    else if (c.escalated) t += '<span class="tag esc">حُوِّل إلى المدير</span>';
     if (c.has_viewing) t += '<span class="tag view">معاينة</span>';
     return t;
   }
@@ -1339,16 +1341,16 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
     if (!customers.length) {
       $('#customersTable').innerHTML =
-        '<div class="empty">' + (q ? 'ما فيه نتائج لهذا البحث.' : 'لما يراسل أول عميل البوت، بيظهر هنا.') + '</div>';
+        '<div class="empty">' + (q ? 'لا توجد نتائج لهذا البحث.' : 'سيظهر العملاء هنا عند مراسلة أول عميل للبوت.') + '</div>';
       return;
     }
 
     $('#customersTable').innerHTML =
-      '<table><thead><tr><th>العميل</th><th>آخر رسالة</th><th>رسائله</th><th>آخر نشاط</th><th></th></tr></thead><tbody>' +
+      '<table><thead><tr><th>العميل</th><th>آخر رسالة</th><th>عدد رسائله</th><th>آخر نشاط</th><th></th></tr></thead><tbody>' +
       customers.map((c) =>
         '<tr class="clickable" data-phone="' + esc(c.customer_phone) + '">' +
           '<td><span class="ltr">' + esc(localPhone(c.customer_phone)) + '</span><br>' + tags(c) + '</td>' +
-          '<td><div class="snippet">' + esc(c.last_message || 'وصله قالب ولم يرد') + '</div></td>' +
+          '<td><div class="snippet">' + esc(c.last_message || 'وصله قالب ولم يردّ') + '</div></td>' +
           '<td>' + esc(c.user_messages) + '</td>' +
           '<td>' + esc(fmt(c.last_at)) + '</td>' +
           '<td><a class="wa" target="_blank" rel="noopener" href="https://wa.me/' + esc(c.customer_phone) + '" onclick="event.stopPropagation()">واتساب</a></td>' +
@@ -1366,7 +1368,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
     const table = (list, emptyText) => {
       if (!list.length) return '<div class="empty">' + emptyText + '</div>';
-      return '<div class="panel" style="border:0"><table><thead><tr><th>العميل</th><th>الطلب</th><th>وصل للمدير؟</th><th>الوقت</th><th></th></tr></thead><tbody>' +
+      return '<div class="panel" style="border:0"><table><thead><tr><th>العميل</th><th>الطلب</th><th>أُبلغ المدير؟</th><th>الوقت</th><th></th></tr></thead><tbody>' +
         list.map((r) =>
           '<tr class="clickable" data-phone="' + esc(r.customer_phone) + '">' +
             '<td><span class="ltr">' + esc(localPhone(r.customer_phone)) + '</span>' + (r.hot ? '<br><span class="tag hot">احجز شراء</span>' : '') + '</td>' +
@@ -1379,11 +1381,11 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
         '</tbody></table></div>';
     };
 
-    $('#escalationsTable').innerHTML = table(rows, 'ما فيه طلبات للمدير حتى الآن.');
+    $('#escalationsTable').innerHTML = table(rows, 'لا توجد طلبات للمدير حتى الآن.');
 
     const seen = new Set();
     const hot = rows.filter((r) => r.hot && !seen.has(r.customer_phone) && seen.add(r.customer_phone));
-    $('#hotTable').innerHTML = table(hot, 'لا يوجد عملاء ضغطوا "احجز شراء" حتى الآن.');
+    $('#hotTable').innerHTML = table(hot, 'لا يوجد عملاء ضغطوا على «احجز شراء» حتى الآن.');
 
     document.querySelectorAll('#escalationsTable tr.clickable, #hotTable tr.clickable').forEach((tr) => {
       tr.addEventListener('click', () => openConversation(tr.dataset.phone));
@@ -1394,7 +1396,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     const rows = await api('/admin/api/viewings');
 
     if (!rows.length) {
-      $('#viewingsTable').innerHTML = '<div class="empty">ما فيه طلبات معاينة حتى الآن.</div>';
+      $('#viewingsTable').innerHTML = '<div class="empty">لا توجد طلبات معاينة حتى الآن.</div>';
       return;
     }
 
@@ -1422,7 +1424,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   async function openConversation(phone) {
     $('#drawerPhone').textContent = localPhone(phone);
     $('#drawerWa').href = 'https://wa.me/' + phone;
-    $('#thread').innerHTML = '<div class="empty">جاري التحميل...</div>';
+    $('#thread').innerHTML = '<div class="empty">جارٍ التحميل...</div>';
     $('#drawer').classList.add('open');
     $('#drawerBg').classList.add('open');
 
@@ -1434,7 +1436,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
           const cls = isTpl ? 'template' : (m.role === 'assistant' ? 'assistant' : 'user');
           return '<div class="msg ' + cls + '">' + esc(m.message) + '<time>' + esc(fmt(m.created_at)) + '</time></div>';
         }).join('')
-      : '<div class="empty">ما فيه رسائل.</div>';
+      : '<div class="empty">لا توجد رسائل.</div>';
 
     $('#thread').scrollTop = $('#thread').scrollHeight;
   }
@@ -1466,14 +1468,14 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     const t = templates.find((x) => x.key === $('#tplSelect').value);
     if (!t) return;
     $('#tplPreview').textContent = t.preview.replace(/^\[[^\]]*\]\n?/, '');
-    $('#tplVideo').textContent = t.hasVideo ? 'الرسالة يوصل معها فيديو المشروع في الأعلى.' : '';
+    $('#tplVideo').textContent = t.hasVideo ? 'يُرسل مع الرسالة فيديو المشروع في أعلاها.' : '';
   }
 
   $('#tplSelect').addEventListener('change', showPreview);
 
   function countNumbers() {
     const n = $('#numbers').value.split(/[\n,،]+/).map((x) => x.trim()).filter(Boolean).length;
-    $('#numbersHint').textContent = n ? n + ' رقم. حتى 200 رقم في المرة.' : 'كل رقم في سطر. حتى 200 رقم.';
+    $('#numbersHint').textContent = n ? n + ' رقم (بحد أقصى 200 رقم في المرة الواحدة).' : 'اكتب كل رقم في سطر مستقل، بحد أقصى 200 رقم.';
   }
 
   $('#numbers').addEventListener('input', countNumbers);
@@ -1490,16 +1492,16 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
     if (!numbers.length) {
       $('#sendResult').style.display = 'block';
-      $('#sendResult').textContent = 'اكتب رقم واحد على الأقل.';
+      $('#sendResult').textContent = 'اكتب رقمًا واحدًا على الأقل.';
       return;
     }
 
-    if (!confirm('إرسال قالب "' + key + '" إلى ' + numbers.length + ' رقم؟')) return;
+    if (!confirm('هل تريد إرسال القالب «' + key + '» إلى ' + numbers.length + ' رقم؟')) return;
 
     $('#sendBtn').disabled = true;
-    $('#sendBtn').textContent = 'جاري الإرسال...';
+    $('#sendBtn').textContent = 'جارٍ الإرسال...';
     $('#sendResult').style.display = 'block';
-    $('#sendResult').textContent = 'جاري الإرسال، لا تقفل الصفحة...';
+    $('#sendResult').textContent = 'جارٍ الإرسال، لا تغلق الصفحة...';
 
     try {
       const r = await api('/admin/api/send-template', {
@@ -1509,19 +1511,19 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
       if (r.error) {
         const msgs = {
-          no_numbers: 'ما لقيت أرقام صحيحة. اكتبها مثل 0551234567.',
-          too_many_numbers: 'العدد أكثر من 200. قسّمها على أكثر من مرة.',
+          no_numbers: 'لم يتم العثور على أرقام صحيحة. اكتبها بصيغة 0551234567.',
+          too_many_numbers: 'العدد يتجاوز 200 رقم. قسّم الأرقام على أكثر من دفعة.',
           unknown_template: 'القالب غير موجود.',
         };
-        $('#sendResult').textContent = msgs[r.error] || 'صار خطأ. جرّب مرة ثانية.';
+        $('#sendResult').textContent = msgs[r.error] || 'حدث خطأ. حاول مرة أخرى.';
       } else {
-        let text = 'تم الإرسال: ' + r.sent.length + '\nفشل: ' + r.failed.length;
-        if (r.failed.length) text += '\n\nالأرقام اللي فشلت:\n' + r.failed.join('\n');
+        let text = 'تم الإرسال إلى: ' + r.sent.length + '\nتعذّر الإرسال إلى: ' + r.failed.length;
+        if (r.failed.length) text += '\n\nالأرقام التي تعذّر الإرسال إليها:\n' + r.failed.join('\n');
         $('#sendResult').textContent = text;
         refreshAll();
       }
     } catch (e) {
-      $('#sendResult').textContent = 'انقطع الاتصال. تأكد من النت وجرّب مرة ثانية.';
+      $('#sendResult').textContent = 'انقطع الاتصال. تأكد من الإنترنت وحاول مرة أخرى.';
     }
 
     $('#sendBtn').disabled = false;
