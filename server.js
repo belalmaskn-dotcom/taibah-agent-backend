@@ -52,6 +52,15 @@ const OPENAI_API_KEY =
   process.env.OPENAI_API_KEY ||
   '';
 
+const ANTHROPIC_API_KEY =
+  process.env.ANTHROPIC_API_KEY ||
+  '';
+
+// موديل صغير وسريع لفهم "هل العميل يبي يوقف؟"
+const INTENT_MODEL =
+  process.env.INTENT_MODEL ||
+  'claude-haiku-5-5';
+
 const ADMIN_REPORT_CODE =
   process.env.ADMIN_REPORT_CODE ||
   '';
@@ -286,6 +295,16 @@ async function initializeDatabase() {
   await pool.query(`
     ALTER TABLE conversations
     ADD COLUMN IF NOT EXISTS template_msg_id INT;
+  `);
+
+  // جدول جديد: لما العميل يوقف المحادثة، البوت يبدأ معه من جديد
+  // (المحادثة القديمة تبقى محفوظة في اللوحة، بس البوت ما يقرأها)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS conversation_resets (
+      customer_phone VARCHAR(30) PRIMARY KEY,
+      after_id INT NOT NULL DEFAULT 0,
+      reset_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   console.log(
@@ -1274,6 +1293,7 @@ async function saveConversation(
 
 // =====================================================
 // جلب المحادثة
+// (البوت يقرأ فقط الرسائل اللي بعد آخر "إيقاف" من العميل)
 // =====================================================
 
 async function getConversationHistory(
@@ -1292,6 +1312,14 @@ async function getConversationHistory(
           created_at
         FROM conversations
         WHERE customer_phone = $1
+          AND id > COALESCE(
+            (
+              SELECT after_id
+              FROM conversation_resets
+              WHERE customer_phone = $1
+            ),
+            0
+          )
         ORDER BY created_at DESC, id DESC
         LIMIT $2
         `,
@@ -1327,6 +1355,289 @@ async function getConversationHistory(
 
     return [];
   }
+}
+
+
+// =====================================================
+// إيقاف المحادثة (العميل يبي يوقف بأي صيغة)
+// =====================================================
+
+const STOP_REPLY =
+`تم ✅ وقفنا الطلب.
+
+ولو احتجت أي خدمة مستقبلاً، راسلنا في أي وقت وحياك الله 🌹`;
+
+
+// تنظيف النص عشان نقارن الكلمات بسهولة
+function normalizeForStop(
+  text
+) {
+
+  return convertDigitsToEnglish(text)
+    .toLowerCase()
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/ـ/g, '')
+    .replace(/[ًٌٍَُِّْ]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+
+// رسائل لو العميل كتبها لوحدها = إيقاف أكيد
+const STOP_EXACT = new Set(
+  [
+    'ايقاف', 'الايقاف', 'وقف', 'اوقف', 'توقف', 'وقفو', 'وقفوا',
+    'انهاء', 'انهي', 'انهيها', 'انهي المحادثه', 'انهاء المحادثه',
+    'خروج', 'اخرج', 'اطلع',
+    'الغاء', 'الغي', 'الغيه', 'الغيها', 'الغ', 'الغي الطلب', 'الغاء الطلب',
+    'كنسل', 'كانسل', 'كنسله',
+    'ما ابغي', 'ما ابي', 'مابغي', 'مابي', 'ما ابغاه', 'ما ابغاها', 'ما ابيه', 'ما ابيها',
+    'مابغاه', 'مابغاها', 'مابيه', 'مابيها', 'ما ابغي شي', 'ما ابي شي',
+    'لا ابغي', 'لا ابي', 'لا ما ابغي', 'لا ما ابي', 'لا شكرا', 'لا مشكور', 'لا يعطيك العافيه',
+    'مو مهتم', 'مب مهتم', 'ماني مهتم', 'مش مهتم', 'غير مهتم',
+    'كفايه', 'يكفي', 'اتركني', 'خلني', 'سيبني',
+    'لا تراسلني', 'لا ترسل', 'لا ترسلون', 'لا ترسل لي',
+    'stop', 'cancel', 'end', 'exit', 'quit', 'unsubscribe', 'no thanks', 'not interested',
+  ].map(normalizeForStop)
+);
+
+
+// عبارات لو جت في أي مكان في الرسالة = إيقاف أكيد
+const STOP_CONTAINS = [
+  'لا تراسلني', 'لا تراسلوني', 'لا ترسل لي', 'لا ترسلون لي', 'لا ترسلوا لي',
+  'وقف الرسايل', 'وقف الرسائل', 'وقفوا الرسايل', 'وقفوا الرسائل',
+  'ايقاف الرسايل', 'ايقاف الرسائل', 'الغاء الاشتراك',
+  'ما ابغي شي', 'ما ابي شي', 'ما عاد ابغي', 'ما عاد ابي',
+  'مو مهتم', 'مب مهتم', 'ماني مهتم', 'مش مهتم', 'غير مهتم',
+  'انهي المحادثه', 'انهاء المحادثه', 'سكر المحادثه',
+  'unsubscribe', 'stop messages', 'stop messaging', 'not interested',
+].map(normalizeForStop);
+
+
+function isExplicitStop(
+  text
+) {
+
+  const t =
+    normalizeForStop(text);
+
+  if (!t) {
+    return false;
+  }
+
+  if (STOP_EXACT.has(t)) {
+    return true;
+  }
+
+  return STOP_CONTAINS.some(
+    (phrase) =>
+      t.includes(phrase)
+  );
+}
+
+
+// رسالة "ممكن تكون" إيقاف بصيغة ثانية → نسأل الذكاء الاصطناعي
+function mightBeStop(
+  text
+) {
+
+  const t =
+    normalizeForStop(text);
+
+  if (!t || t.length > 120) {
+    return false;
+  }
+
+  const roots = [
+    'وقف', 'ايقاف', 'انه', 'خروج', 'الغ', 'كنسل', 'كانسل',
+    'مهتم', 'اترك', 'خلني', 'سيبني', 'تراسل', 'ترسل', 'كفايه', 'يكفي',
+    'خلاص', 'ازعاج', 'ازعجت', 'stop', 'cancel', 'quit',
+  ];
+
+  if (roots.some((r) => t.includes(r))) {
+    return true;
+  }
+
+  const negation =
+    /(^|\s)(ما|مو|مب|لا|ماني|مش|مابي|مابغي)(\s|$)/.test(t);
+
+  const want =
+    /(ابي|ابغي|ابغا|ابيه|ابغاه|ابيها|ابغاها|بغيت|اريد|عاوز|عايز)/.test(t);
+
+  return negation && want;
+}
+
+
+// نسأل الذكاء الاصطناعي: العميل يبي يوقف؟ ولا يجاوب على سؤال المعاينة؟ ولا شي ثاني؟
+// يرجع: STOP أو VIEWING_ANSWER أو OTHER (أو null لو صار خطأ)
+async function classifyIntent(
+  text,
+  lastBotMessage,
+  inViewingSession
+) {
+
+  if (!ANTHROPIC_API_KEY) {
+    return null;
+  }
+
+  const system =
+`أنت تصنّف رسالة عميل في محادثة واتساب مع بوت شركة عقارات سعودية.
+
+مهم: في اللهجة السعودية "أوقف على العقار" أو "أبي أوقف عليها" تعني "أزور العقار وأعاينه"، وهذا ليس إيقافًا.
+
+التصنيفات:
+STOP = العميل يبي يوقف المحادثة أو يلغي الطلب أو ما عاد يبي يكمل أو يبي يوقف الرسائل (بأي صيغة، حتى لو بأدب أو بعصبية).
+VIEWING_ANSWER = العميل يجاوب على سؤال البوت عن موعد المعاينة (يوم، تاريخ، وقت، فترة مثل "العصر" أو "بعد المغرب"، أو صفته مشتري/مكتب).
+OTHER = أي شي ثاني (سؤال جديد، طلب تفاصيل، تحية، كلام عن عقار ثاني...).
+
+${inViewingSession ? 'البوت حاليًا في منتصف حجز معاينة مع العميل.' : 'البوت حاليًا مو في حجز معاينة، فلا تستخدم VIEWING_ANSWER.'}
+
+رد بكلمة وحدة فقط: STOP أو VIEWING_ANSWER أو OTHER`;
+
+  try {
+
+    const response =
+      await axios.post(
+
+        'https://api.anthropic.com/v1/messages',
+
+        {
+          model: INTENT_MODEL,
+          max_tokens: 10,
+          system,
+          messages: [
+            {
+              role: 'user',
+              content:
+`آخر رسالة من البوت:
+${String(lastBotMessage || '(لا يوجد)').slice(0, 500)}
+
+رسالة العميل:
+${String(text || '').slice(0, 500)}`,
+            },
+          ],
+        },
+
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+          },
+          timeout: 15000,
+        }
+      );
+
+    const answer =
+      (response.data?.content || [])
+        .map((b) => b.text || '')
+        .join('')
+        .toUpperCase();
+
+    if (answer.includes('STOP')) {
+      return 'STOP';
+    }
+
+    if (answer.includes('VIEWING')) {
+      return inViewingSession ? 'VIEWING_ANSWER' : 'OTHER';
+    }
+
+    if (answer.includes('OTHER')) {
+      return 'OTHER';
+    }
+
+    return null;
+
+  } catch (err) {
+
+    console.error(
+      'Intent classifier error:',
+      JSON.stringify(
+        err.response?.data ||
+          err.message
+      )
+    );
+
+    return null;
+  }
+}
+
+
+// من الآن، البوت ينسى المحادثة القديمة لهذا العميل
+async function markConversationReset(
+  customerPhone
+) {
+
+  const phone =
+    normalizePhone(customerPhone);
+
+  try {
+
+    await pool.query(
+      `
+      INSERT INTO conversation_resets
+      (
+        customer_phone,
+        after_id,
+        reset_at
+      )
+      VALUES
+      (
+        $1,
+        COALESCE(
+          (SELECT MAX(id) FROM conversations WHERE customer_phone = $1),
+          0
+        ),
+        CURRENT_TIMESTAMP
+      )
+      ON CONFLICT (customer_phone)
+      DO UPDATE SET
+        after_id = EXCLUDED.after_id,
+        reset_at = CURRENT_TIMESTAMP
+      `,
+      [phone]
+    );
+
+  } catch (err) {
+
+    console.error(
+      'Mark conversation reset error:',
+      err
+    );
+  }
+}
+
+
+async function handleCustomerStop(
+  customerPhone
+) {
+
+  console.log(
+    `🛑 العميل ${customerPhone} طلب الإيقاف — قفلنا الطلب والمحادثة الجاية تبدأ من جديد`
+  );
+
+  await closeViewingSession(
+    customerPhone
+  );
+
+  await sendWhatsAppText(
+    customerPhone,
+    STOP_REPLY
+  );
+
+  await saveConversation(
+    customerPhone,
+    'assistant',
+    STOP_REPLY
+  );
+
+  // لازم بعد حفظ رد الإيقاف، عشان حتى رسالة الإيقاف نفسها ما يقرأها البوت بعدين
+  await markConversationReset(
+    customerPhone
+  );
 }
 
 
@@ -2515,12 +2826,16 @@ async function processViewingFlow({
   customerPhone,
   userText,
   history,
+  classify,
 }) {
 
   let session =
     await getViewingSession(
       customerPhone
     );
+
+  const hadSessionBefore =
+    Boolean(session);
 
   const newViewingRequest =
     isViewingRequest(
@@ -2578,6 +2893,49 @@ async function processViewingFlow({
 
   if (extracted.customerType) {
     updates.customerType = extracted.customerType;
+  }
+
+  // العميل في نص حجز قديم، والرسالة ما فيها يوم ولا وقت ولا صفة:
+  // نفهم منه: يبي يوقف؟ ولا يجاوب بطريقة ثانية؟ ولا يتكلم في شي ثاني؟
+  if (
+    hadSessionBefore &&
+    !newViewingRequest &&
+    !Object.keys(updates).length
+  ) {
+
+    const intent =
+      (await classify()) ||
+      // لو الذكاء الاصطناعي ما رد، نعتبرها جواب (عشان الحجز يتقدم وما يعلق)
+      'VIEWING_ANSWER';
+
+    if (intent === 'STOP') {
+      return { stop: true };
+    }
+
+    if (intent === 'OTHER') {
+
+      console.log(
+        `↩️ العميل ${customerPhone} طلع من حجز المعاينة وتكلم في شي ثاني`
+      );
+
+      await closeViewingSession(
+        customerPhone
+      );
+
+      return null;
+    }
+
+    // VIEWING_ANSWER: نحط كلامه في أول خانة ناقصة (مثل "العصر" أو "الأسبوع الجاي")
+    const answer =
+      String(userText).trim().slice(0, 100);
+
+    if (!session.requested_day) {
+      updates.day = answer;
+    } else if (!session.requested_time) {
+      updates.time = answer;
+    } else if (!session.customer_type) {
+      updates.customerType = answer;
+    }
   }
 
   if (Object.keys(updates).length) {
@@ -3394,13 +3752,87 @@ async function processCustomerMessage(
       : userText
   );
 
+  // =================================================
+  // إيقاف المحادثة (أي صيغة)
+  // =================================================
+
+  const activeSession =
+    await getViewingSession(
+      from
+    );
+
+  const lastBotMessage =
+    [...history]
+      .reverse()
+      .find((m) => m.role === 'assistant')
+      ?.content || '';
+
+  // نسأل الذكاء الاصطناعي مرة وحدة بس لكل رسالة (ونحفظ الجواب)
+  let cachedIntent;
+
+  const classify =
+    async () => {
+
+      if (cachedIntent === undefined) {
+
+        cachedIntent =
+          await classifyIntent(
+            userText,
+            lastBotMessage,
+            Boolean(activeSession)
+          );
+
+        console.log(
+          `🧭 فهم نية العميل ${from}: ${cachedIntent || 'غير معروف'}`
+        );
+      }
+
+      return cachedIntent;
+    };
+
+  // 1) كلمة إيقاف واضحة
+  if (isExplicitStop(userText)) {
+
+    await handleCustomerStop(
+      from
+    );
+
+    return;
+  }
+
+  // 2) صيغة ممكن تكون إيقاف (وهو مو في حجز معاينة) → نتأكد من الذكاء الاصطناعي
+  if (
+    !activeSession &&
+    !isViewingRequest(userText) &&
+    mightBeStop(userText) &&
+    (await classify()) === 'STOP'
+  ) {
+
+    await handleCustomerStop(
+      from
+    );
+
+    return;
+  }
+
   // نظام المعاينة
   const viewingResult =
     await processViewingFlow({
       customerPhone: from,
       userText,
       history,
+      classify,
     });
+
+  // 3) العميل في نص حجز وقال إنه يبي يوقف بصيغة ثانية
+  if (viewingResult?.stop) {
+
+    await handleCustomerStop(
+      from
+    );
+
+    return;
+  }
 
   if (viewingResult?.handled) {
 
@@ -3685,6 +4117,10 @@ async function startServer() {
 
         console.log(
           'Delivery status tracking: enabled'
+        );
+
+        console.log(
+          `Stop detection: enabled (intent model: ${ANTHROPIC_API_KEY ? INTENT_MODEL : 'disabled - keywords only'})`
         );
 
         startCampaignQueue().catch((err) => {
