@@ -12,9 +12,13 @@ function registerDashboard(app, deps) {
     normalizePhone,
     toInternationalSaudi,
     TEMPLATES,
-    sendTemplateToNumbers,
+    createCampaign,
+    setCampaignStatus,
+    extractNumbers,
     createReportWorkbook,
     password,
+    maxNumbersPerCampaign = 500,
+    defaultDelaySeconds = 8,
   } = deps;
 
 
@@ -176,6 +180,36 @@ function registerDashboard(app, deps) {
 
 
   // =====================================================
+  // رسائل القوالب (مع معرفة هل العميل ردّ بعدها)
+  // =====================================================
+
+  const TEMPLATE_MESSAGES_SQL = `
+    SELECT
+      tm.*,
+      EXISTS (
+        SELECT 1
+        FROM conversations c
+        WHERE c.customer_phone = tm.customer_phone
+          AND c.role = 'user'
+          AND c.created_at > COALESCE(tm.sent_at, tm.queued_at)
+      ) AS replied
+    FROM template_messages tm
+  `;
+
+  const TEMPLATE_FILTERS = {
+    all: 'TRUE',
+    queued: "status IN ('queued', 'sending')",
+    reached: "status IN ('delivered', 'read')",
+    delivered: "status = 'delivered'",
+    read: "status = 'read'",
+    noreply: "status IN ('sent', 'delivered', 'read') AND NOT replied",
+    readnoreply: "status = 'read' AND NOT replied",
+    replied: "status IN ('sent', 'delivered', 'read') AND replied",
+    failed: "status = 'failed'",
+  };
+
+
+  // =====================================================
   // الأرقام العامة
   // =====================================================
 
@@ -195,6 +229,7 @@ function registerDashboard(app, deps) {
         escalations,
         hotLeads,
         messagesToday,
+        templateStats,
       ] = await Promise.all([
         q(`SELECT COUNT(DISTINCT customer_phone)::int AS count FROM conversations WHERE role = 'user'`),
         q(`SELECT COUNT(DISTINCT customer_phone)::int AS count FROM conversations WHERE role = 'user' AND created_at >= CURRENT_DATE`),
@@ -202,7 +237,21 @@ function registerDashboard(app, deps) {
         q(`SELECT COUNT(*)::int AS count FROM manager_escalations`),
         q(`SELECT COUNT(DISTINCT customer_phone)::int AS count FROM manager_escalations WHERE question LIKE '%احجز شراء%'`),
         q(`SELECT COUNT(*)::int AS count FROM conversations WHERE role = 'user' AND created_at >= CURRENT_DATE`),
+        pool.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE status IN ('queued', 'sending'))::int AS queued,
+            COUNT(*) FILTER (WHERE status IN ('sent', 'delivered', 'read'))::int AS accepted,
+            COUNT(*) FILTER (WHERE status IN ('delivered', 'read'))::int AS reached,
+            COUNT(*) FILTER (WHERE status = 'read')::int AS read_total,
+            COUNT(*) FILTER (WHERE status IN ('sent', 'delivered', 'read') AND NOT replied)::int AS no_reply,
+            COUNT(*) FILTER (WHERE status = 'read' AND NOT replied)::int AS read_no_reply,
+            COUNT(*) FILTER (WHERE status IN ('sent', 'delivered', 'read') AND replied)::int AS replied,
+            COUNT(*) FILTER (WHERE status = 'failed')::int AS failed
+          FROM (${TEMPLATE_MESSAGES_SQL}) t
+        `),
       ]);
+
+      const t = templateStats.rows[0] || {};
 
       res.json({
         customers,
@@ -211,6 +260,16 @@ function registerDashboard(app, deps) {
         escalations,
         hotLeads,
         messagesToday,
+        templates: {
+          queued: t.queued || 0,
+          accepted: t.accepted || 0,
+          reached: t.reached || 0,
+          read: t.read_total || 0,
+          noReply: t.no_reply || 0,
+          readNoReply: t.read_no_reply || 0,
+          replied: t.replied || 0,
+          failed: t.failed || 0,
+        },
       });
 
     } catch (err) {
@@ -221,8 +280,17 @@ function registerDashboard(app, deps) {
   });
 
 
+  app.get('/admin/api/config', requireLogin, (req, res) => {
+
+    res.json({
+      maxNumbers: maxNumbersPerCampaign,
+      defaultDelay: defaultDelaySeconds,
+    });
+  });
+
+
   // =====================================================
-  // العملاء
+  // العملاء (أحدث عميل راسل البوت في الأعلى)
   // =====================================================
 
   app.get('/admin/api/customers', requireLogin, async (req, res) => {
@@ -251,11 +319,18 @@ function registerDashboard(app, deps) {
           SELECT
             customer_phone,
             SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END)::int AS user_messages,
-            MAX(created_at) AS last_at
+            MAX(created_at) AS last_at,
+            MAX(created_at) FILTER (WHERE role = 'user') AS last_user_at,
+            COALESCE(
+              MAX(created_at) FILTER (WHERE role = 'user') >= CURRENT_DATE,
+              false
+            ) AS active_today
           FROM conversations
           ${where}
           GROUP BY customer_phone
-          ORDER BY last_at DESC
+          ORDER BY
+            MAX(created_at) FILTER (WHERE role = 'user') DESC NULLS LAST,
+            MAX(created_at) DESC
           LIMIT 500
           `,
           params
@@ -273,8 +348,8 @@ function registerDashboard(app, deps) {
       const placeholders =
         phones.map((_, i) => `$${i + 1}`).join(', ');
 
-      // 2) آخر رسالة من كل عميل + المعاينات + التحويلات
-      const [lastMessages, viewings, escalations] =
+      // 2) آخر رسالة من كل عميل + المعاينات + التحويلات + حالة آخر قالب
+      const [lastMessages, viewings, escalations, lastTemplates] =
         await Promise.all([
           pool.query(
             `
@@ -292,6 +367,15 @@ function registerDashboard(app, deps) {
           ),
           pool.query(
             `SELECT customer_phone, question FROM manager_escalations WHERE customer_phone IN (${placeholders})`,
+            phones
+          ),
+          pool.query(
+            `
+            SELECT DISTINCT ON (customer_phone) customer_phone, status
+            FROM template_messages
+            WHERE customer_phone IN (${placeholders})
+            ORDER BY customer_phone, id DESC
+            `,
             phones
           ),
         ]);
@@ -317,6 +401,12 @@ function registerDashboard(app, deps) {
         }
       }
 
+      const templateStatus = {};
+
+      for (const t of lastTemplates.rows) {
+        templateStatus[t.customer_phone] = t.status;
+      }
+
       res.json(
         rows.map((r) => ({
           ...r,
@@ -324,6 +414,7 @@ function registerDashboard(app, deps) {
           has_viewing: viewingSet.has(r.customer_phone),
           escalated: escalatedSet.has(r.customer_phone),
           hot: hotSet.has(r.customer_phone),
+          last_tpl_status: templateStatus[r.customer_phone] || null,
         }))
       );
 
@@ -342,10 +433,16 @@ function registerDashboard(app, deps) {
       const result =
         await pool.query(
           `
-          SELECT role, message, created_at
-          FROM conversations
-          WHERE customer_phone = $1
-          ORDER BY created_at ASC, id ASC
+          SELECT
+            c.role,
+            c.message,
+            c.created_at,
+            tm.status AS tm_status,
+            tm.error_text AS tm_error
+          FROM conversations c
+          LEFT JOIN template_messages tm ON tm.id = c.template_msg_id
+          WHERE c.customer_phone = $1
+          ORDER BY c.created_at ASC, c.id ASC
           LIMIT 1000
           `,
           [normalizePhone(req.params.phone)]
@@ -415,7 +512,7 @@ function registerDashboard(app, deps) {
 
 
   // =====================================================
-  // القوالب
+  // القوالب والحملات
   // =====================================================
 
   app.get('/admin/api/templates', requireLogin, (req, res) => {
@@ -433,31 +530,24 @@ function registerDashboard(app, deps) {
   });
 
 
-  app.post('/admin/api/send-template', requireLogin, async (req, res) => {
+  // إنشاء حملة: الإرسال يتم في الخلفية على السيرفر (رسالة كل X ثانية)
+  app.post('/admin/api/campaigns', requireLogin, async (req, res) => {
 
     try {
 
-      const template =
-        TEMPLATES[req.body?.templateKey];
+      const templateKey =
+        req.body?.templateKey;
 
-      if (!template) {
+      if (!TEMPLATES[templateKey]) {
         return res
           .status(400)
           .json({ error: 'unknown_template' });
       }
 
-      const raw =
-        Array.isArray(req.body?.numbers)
-          ? req.body.numbers
-          : [];
-
-      const numbers = [
-        ...new Set(
-          raw
-            .map((n) => toInternationalSaudi(n))
-            .filter(Boolean)
-        ),
-      ];
+      const numbers =
+        extractNumbers(
+          String(req.body?.numbersText || '')
+        );
 
       if (!numbers.length) {
         return res
@@ -465,23 +555,141 @@ function registerDashboard(app, deps) {
           .json({ error: 'no_numbers' });
       }
 
-      if (numbers.length > 200) {
+      if (numbers.length > maxNumbersPerCampaign) {
         return res
           .status(400)
           .json({ error: 'too_many_numbers' });
       }
 
-      const result =
-        await sendTemplateToNumbers(
-          template,
-          numbers
+      const campaign =
+        await createCampaign(
+          templateKey,
+          numbers,
+          {
+            delaySeconds: req.body?.delaySeconds,
+          }
         );
 
-      res.json(result);
+      res.json({ ok: true, ...campaign });
 
     } catch (err) {
 
-      console.error('Dashboard send template error:', err);
+      console.error('Dashboard create campaign error:', err);
+      res.status(500).json({ error: 'server_error' });
+    }
+  });
+
+
+  app.get('/admin/api/campaigns', requireLogin, async (req, res) => {
+
+    try {
+
+      const result =
+        await pool.query(`
+          SELECT
+            c.id,
+            c.template_key,
+            c.template_name,
+            c.delay_seconds,
+            c.status,
+            c.created_at,
+            c.finished_at,
+            COUNT(tm.id)::int AS total,
+            COUNT(*) FILTER (WHERE tm.status IN ('queued', 'sending'))::int AS queued,
+            COUNT(*) FILTER (WHERE tm.status = 'sent')::int AS sent,
+            COUNT(*) FILTER (WHERE tm.status = 'delivered')::int AS delivered,
+            COUNT(*) FILTER (WHERE tm.status = 'read')::int AS read_count,
+            COUNT(*) FILTER (WHERE tm.status = 'failed')::int AS failed,
+            COUNT(*) FILTER (WHERE tm.status = 'cancelled')::int AS cancelled
+          FROM campaigns c
+          LEFT JOIN template_messages tm ON tm.campaign_id = c.id
+          GROUP BY c.id
+          ORDER BY c.id DESC
+          LIMIT 30
+        `);
+
+      res.json(result.rows);
+
+    } catch (err) {
+
+      console.error('Dashboard campaigns error:', err);
+      res.status(500).json({ error: 'server_error' });
+    }
+  });
+
+
+  app.post('/admin/api/campaigns/:id/:action', requireLogin, async (req, res) => {
+
+    try {
+
+      const id =
+        parseInt(req.params.id, 10);
+
+      const action =
+        String(req.params.action || '');
+
+      if (
+        !Number.isInteger(id) ||
+        !['pause', 'resume', 'cancel'].includes(action)
+      ) {
+        return res
+          .status(400)
+          .json({ error: 'bad_request' });
+      }
+
+      await setCampaignStatus(id, action);
+
+      res.json({ ok: true });
+
+    } catch (err) {
+
+      console.error('Dashboard campaign action error:', err);
+      res.status(500).json({ error: 'server_error' });
+    }
+  });
+
+
+  // كل رسائل القوالب مع حالتها (أُرسلت / وصلت / قُرئت / فشلت) وهل ردّ العميل
+  app.get('/admin/api/template-messages', requireLogin, async (req, res) => {
+
+    try {
+
+      const filterKey =
+        Object.prototype.hasOwnProperty.call(
+          TEMPLATE_FILTERS,
+          req.query.filter
+        )
+          ? req.query.filter
+          : 'all';
+
+      const campaignId =
+        parseInt(req.query.campaign, 10);
+
+      const params = [];
+      let campaignClause = '';
+
+      if (Number.isInteger(campaignId)) {
+        params.push(campaignId);
+        campaignClause = 'WHERE tm.campaign_id = $1';
+      }
+
+      const result =
+        await pool.query(
+          `
+          SELECT *
+          FROM (${TEMPLATE_MESSAGES_SQL} ${campaignClause}) t
+          WHERE ${TEMPLATE_FILTERS[filterKey]}
+          ORDER BY id DESC
+          LIMIT 500
+          `,
+          params
+        );
+
+      res.json(result.rows);
+
+    } catch (err) {
+
+      console.error('Dashboard template messages error:', err);
       res.status(500).json({ error: 'server_error' });
     }
   });
@@ -548,7 +756,18 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     --gold-soft: #F5EDDA;
     --hot: #B3412E;
     --hot-soft: #F8E7E3;
+    --wa-blue: #2AA3DF;
+    --accent: #1E5B43;
+    --accent-soft: #E3EEE8;
   }
+
+  /* لون خاص لكل خانة: عشان تعرف أنت واقف فين بالظبط */
+  body[data-view="overview"]    { --accent: #1E5B43; --accent-soft: #E3EEE8; }
+  body[data-view="customers"]   { --accent: #245EA8; --accent-soft: #E2ECF8; }
+  body[data-view="escalations"] { --accent: #C2571A; --accent-soft: #FBEBDD; }
+  body[data-view="viewings"]    { --accent: #6A4C9C; --accent-soft: #ECE6F5; }
+  body[data-view="messages"]    { --accent: #0F7C80; --accent-soft: #DDF0F0; }
+  body[data-view="send"]        { --accent: #A8822F; --accent-soft: #F5EDDA; }
 
   * { box-sizing: border-box; }
 
@@ -581,6 +800,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   }
 
   .ltr { direction: ltr; unicode-bidi: embed; display: inline-block; }
+  .muted { color: var(--muted); }
 
   /* ---------- Login ---------- */
 
@@ -618,21 +838,26 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     border: 0;
     border-radius: 6px;
     padding: 10px 18px;
-    background: var(--palm);
+    background: var(--accent);
     color: #fff;
     font-weight: 600;
   }
 
-  .btn:hover { background: #17493A; }
+  .btn:hover { filter: brightness(.92); }
   .btn[disabled] { opacity: .6; cursor: wait; }
 
   .btn-ghost {
     background: transparent;
-    color: var(--palm);
+    color: var(--accent);
     border: 1px solid var(--line);
   }
 
-  .btn-ghost:hover { background: var(--palm-soft); }
+  .btn-ghost:hover { background: var(--accent-soft); filter: none; }
+
+  .btn-small { padding: 4px 12px; font-size: 13px; }
+
+  .btn-danger { background: transparent; color: var(--hot); border: 1px solid var(--hot-soft); }
+  .btn-danger:hover { background: var(--hot-soft); filter: none; }
 
   .error { color: var(--hot); min-height: 1.6em; margin-top: 10px; font-size: 14px; }
 
@@ -642,17 +867,26 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
   .shell {
     display: grid;
-    grid-template-columns: 230px 1fr;
+    grid-template-columns: 240px 1fr;
     min-height: 100vh;
   }
 
   aside {
-    background: var(--palm);
+    background: #17231E;
     color: #fff;
-    padding: 26px 18px;
+    padding: 26px 16px;
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  @media (min-width: 861px) {
+    aside {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+    }
   }
 
   .brand {
@@ -667,7 +901,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     display: block;
     font-family: "Cairo", sans-serif;
     font-size: 13px;
-    color: #C9DDD2;
+    color: #B5C9BE;
     font-weight: 400;
   }
 
@@ -678,25 +912,49 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     margin: 12px 0 18px;
   }
 
+  nav { display: flex; flex-direction: column; gap: 4px; }
+
   nav button {
     width: 100%;
     text-align: right;
     background: transparent;
     border: 0;
+    border-right: 5px solid transparent;
     color: #E6F0EA;
     padding: 10px 12px;
     border-radius: 6px;
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    gap: 10px;
   }
+
+  nav button .label { flex: 1; }
+
+  /* مربع ملوّن ثابت قدام كل خانة */
+  nav button::before {
+    content: "";
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    background: var(--c);
+    box-shadow: 0 0 0 2px rgba(255,255,255,.85);
+    flex: none;
+  }
+
+  nav button[data-view="overview"]    { --c: #2F9E72; }
+  nav button[data-view="customers"]   { --c: #4C8EE0; }
+  nav button[data-view="escalations"] { --c: #EE8A4A; }
+  nav button[data-view="viewings"]    { --c: #9D7FD6; }
+  nav button[data-view="messages"]    { --c: #2BB5B9; }
+  nav button[data-view="send"]        { --c: #D9B04E; }
 
   nav button:hover { background: rgba(255,255,255,.08); }
 
   nav button.active {
     background: var(--paper);
-    color: var(--palm);
-    font-weight: 600;
+    color: var(--ink);
+    font-weight: 700;
+    border-right-color: var(--c);
   }
 
   .count {
@@ -706,7 +964,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     border-radius: 10px;
   }
 
-  nav button.active .count { background: var(--palm-soft); }
+  nav button.active .count { background: var(--limestone); }
 
   .count.hot { background: var(--hot); color: #fff; }
 
@@ -728,9 +986,27 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   }
 
   main {
-    padding: 28px 32px 48px;
-    max-width: 1100px;
+    padding: 22px 32px 48px;
+    max-width: 1120px;
     width: 100%;
+    border-top: 6px solid var(--accent);
+  }
+
+  .crumb {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 14px;
+    margin-bottom: 10px;
+  }
+
+  .crumb b {
+    background: var(--accent);
+    color: #fff;
+    padding: 1px 12px;
+    border-radius: 12px;
+    font-weight: 600;
   }
 
   .page-head {
@@ -739,45 +1015,60 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     align-items: end;
     gap: 16px;
     margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--accent-soft);
     flex-wrap: wrap;
   }
 
-  .page-head h2 { font-size: 28px; }
+  .page-head h2 { font-size: 28px; color: var(--accent); }
   .page-head p { margin: 2px 0 0; color: var(--muted); }
 
   section.view { display: none; }
   section.view.active { display: block; }
 
+  h3.sub { font-size: 18px; margin: 26px 0 10px; color: var(--accent); }
+
   /* ---------- Overview ---------- */
 
   .ledger {
-    background: var(--paper);
+    background: var(--line);
     border: 1px solid var(--line);
     display: grid;
     grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
   }
 
-  .ledger div {
-    padding: 18px 20px;
-    border-left: 1px solid var(--line);
-    border-bottom: 1px solid var(--line);
+  .ledger .cell {
+    background: var(--paper);
+    border: 0;
+    border-radius: 0;
+    text-align: right;
+    padding: 16px 20px;
+    display: block;
+    width: 100%;
   }
 
-  .ledger div:nth-child(3n) { border-left: 0; }
-  .ledger div:nth-last-child(-n+3) { border-bottom: 0; }
+  .ledger .cell:hover { background: var(--accent-soft); }
 
-  .ledger b {
+  .ledger .cell b {
     display: block;
     font-family: "Cairo", sans-serif;
     font-weight: 700;
     font-size: 30px;
-    color: var(--palm);
+    color: var(--accent);
     line-height: 1.3;
   }
 
-  .ledger span { color: var(--muted); font-size: 14px; }
+  .ledger .cell span {
+    color: var(--muted);
+    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
 
-  .ledger .is-hot b { color: var(--hot); }
+  .ledger .cell.is-hot b { color: var(--hot); }
+  .ledger .cell.is-bad b { color: var(--hot); }
 
   .hotlist {
     margin-top: 26px;
@@ -798,6 +1089,33 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     font-size: 14px;
   }
 
+  /* ---------- Chips ---------- */
+
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+
+  .chip {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 3px 14px;
+    font-size: 14px;
+    color: var(--ink);
+  }
+
+  .chip:hover { background: var(--accent-soft); }
+
+  .chip.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+
   /* ---------- Tables ---------- */
 
   .panel {
@@ -809,7 +1127,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   table {
     width: 100%;
     border-collapse: collapse;
-    min-width: 640px;
+    min-width: 680px;
   }
 
   th, td {
@@ -820,23 +1138,30 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   }
 
   th {
-    font-weight: 500;
-    color: var(--muted);
+    font-weight: 600;
+    color: var(--accent);
     font-size: 13px;
-    background: #FAFBF8;
+    background: var(--accent-soft);
   }
 
   tr:last-child td { border-bottom: 0; }
 
   tbody tr.clickable { cursor: pointer; }
-  tbody tr.clickable:hover { background: var(--palm-soft); }
+  tbody tr.clickable:hover { background: var(--accent-soft); }
 
   .snippet {
     color: var(--muted);
-    max-width: 340px;
+    max-width: 320px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .why {
+    color: var(--hot);
+    font-size: 12px;
+    max-width: 280px;
+    line-height: 1.5;
   }
 
   .tag {
@@ -851,9 +1176,10 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   .tag.view { background: var(--gold-soft); color: #7A5D1E; }
   .tag.esc { background: var(--palm-soft); color: var(--palm); }
   .tag.hot { background: var(--hot); color: #fff; }
+  .tag.replied { background: #DDF0F0; color: #0F7C80; }
 
   .wa {
-    color: var(--palm);
+    color: var(--accent);
     font-weight: 600;
     text-decoration: none;
     white-space: nowrap;
@@ -874,6 +1200,74 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   }
 
   .toolbar .field { max-width: 360px; }
+
+  /* ---------- Ticks (علامات الصح زي واتساب) ---------- */
+
+  .ticks {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    white-space: nowrap;
+    color: #7A857E;
+  }
+
+  .ticks svg { display: block; }
+  .ticks.read { color: var(--wa-blue); }
+  .ticks.failed { color: var(--hot); }
+  .ticks.queued { color: var(--gold); }
+
+  /* ---------- Campaigns ---------- */
+
+  .camp {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-right: 4px solid var(--accent);
+    padding: 14px 18px;
+    margin-bottom: 12px;
+  }
+
+  .camp.paused { border-right-color: var(--gold); }
+  .camp.cancelled { border-right-color: var(--muted); opacity: .8; }
+  .camp.picked { box-shadow: 0 0 0 2px var(--accent); }
+
+  .camp-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .camp-title { font-weight: 700; }
+
+  .camp-status {
+    font-size: 12px;
+    padding: 1px 10px;
+    border-radius: 10px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    margin-right: 8px;
+  }
+
+  .bar {
+    height: 8px;
+    background: var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 10px 0;
+  }
+
+  .bar i { display: block; height: 100%; background: var(--accent); }
+
+  .camp-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    font-size: 13px;
+  }
+
+  .camp-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 
   /* ---------- Conversation drawer ---------- */
 
@@ -900,7 +1294,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   .drawer-bg.open { display: block; }
 
   .drawer header {
-    background: var(--palm);
+    background: #17231E;
     color: #fff;
     padding: 16px 20px;
     display: flex;
@@ -938,7 +1332,9 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   }
 
   .msg time {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 10px;
     font-size: 11px;
     color: var(--muted);
     margin-top: 4px;
@@ -992,6 +1388,9 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     text-align: left;
   }
 
+  .delay-row { display: flex; align-items: center; gap: 10px; }
+  .delay-row .field { max-width: 110px; text-align: center; }
+
   .hint { color: var(--muted); font-size: 13px; margin-top: 6px; }
 
   .preview {
@@ -1031,15 +1430,14 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     .shell { grid-template-columns: 1fr; }
 
     aside {
-      padding: 16px;
+      padding: 14px;
       gap: 10px;
     }
 
     .rule { display: none; }
 
     nav {
-      display: flex;
-      gap: 6px;
+      flex-direction: row;
       overflow-x: auto;
       padding-bottom: 4px;
     }
@@ -1047,17 +1445,19 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     nav button {
       width: auto;
       white-space: nowrap;
-      gap: 8px;
+      border-right: 0;
+      border-bottom: 4px solid transparent;
     }
+
+    nav button.active { border-bottom-color: var(--c); }
 
     .aside-foot {
       grid-template-columns: 1fr 1fr;
     }
 
-    main { padding: 20px 16px 40px; }
+    main { padding: 18px 16px 40px; }
 
     .ledger { grid-template-columns: repeat(2, 1fr); }
-    .ledger div { border-left: 1px solid var(--line) !important; border-bottom: 1px solid var(--line) !important; }
 
     .send-grid { grid-template-columns: 1fr; }
   }
@@ -1067,7 +1467,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   }
 </style>
 </head>
-<body>
+<body data-view="overview">
 
 <!-- تسجيل الدخول -->
 <div id="login">
@@ -1087,11 +1487,12 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
       <div class="brand">بوت طيبة<small>استثمارات طيبة العقارية</small></div>
       <div class="rule"></div>
       <nav>
-        <button data-view="overview" class="active">نظرة عامة</button>
-        <button data-view="customers">العملاء <span class="count" id="nCustomers">0</span></button>
-        <button data-view="escalations">طلبات المدير <span class="count hot" id="nHot">0</span></button>
-        <button data-view="viewings">المعاينات <span class="count" id="nViewings">0</span></button>
-        <button data-view="send">إرسال قالب</button>
+        <button data-view="overview" class="active"><span class="label">نظرة عامة</span></button>
+        <button data-view="customers"><span class="label">العملاء</span> <span class="count" id="nCustomers">0</span></button>
+        <button data-view="escalations"><span class="label">طلبات المدير</span> <span class="count hot" id="nHot">0</span></button>
+        <button data-view="viewings"><span class="label">المعاينات</span> <span class="count" id="nViewings">0</span></button>
+        <button data-view="messages"><span class="label">الرسائل المرسلة</span> <span class="count" id="nNoReply">0</span></button>
+        <button data-view="send"><span class="label">إرسال قالب</span></button>
       </nav>
       <div class="aside-foot">
         <a href="/admin/api/export">تحميل Excel</a>
@@ -1101,6 +1502,8 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
     <main>
 
+      <div class="crumb">أنت الآن في: <b id="crumbName">نظرة عامة</b></div>
+
       <!-- نظرة عامة -->
       <section class="view active" id="view-overview">
         <div class="page-head">
@@ -1108,10 +1511,14 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
             <h2>نظرة عامة</h2>
             <p id="todayLabel"></p>
           </div>
-          <button class="btn btn-ghost" onclick="refreshAll()">تحديث</button>
+          <button class="btn btn-ghost" id="refreshBtn">تحديث</button>
         </div>
 
+        <h3 class="sub" style="margin-top:0">العملاء والطلبات</h3>
         <div class="ledger" id="ledger"></div>
+
+        <h3 class="sub">حالة القوالب المرسلة</h3>
+        <div class="ledger" id="ledger2"></div>
 
         <div class="hotlist">
           <h3>عملاء جاهزون للشراء</h3>
@@ -1125,12 +1532,13 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
         <div class="page-head">
           <div>
             <h2>العملاء</h2>
-            <p>اضغط على أي عميل لعرض محادثته كاملة.</p>
+            <p>أحدث عميل راسل البوت يظهر في الأعلى. اضغط على أي عميل لعرض محادثته كاملة.</p>
           </div>
         </div>
         <div class="toolbar">
           <input class="field" id="search" type="search" placeholder="ابحث برقم الهاتف أو بكلمة من المحادثة">
         </div>
+        <div class="chips" id="customerChips"></div>
         <div class="panel" id="customersTable"></div>
       </section>
 
@@ -1142,6 +1550,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
             <p>أسئلة لم يستطع البوت الإجابة عنها، وعملاء طلبوا الشراء.</p>
           </div>
         </div>
+        <div class="chips" id="escChips"></div>
         <div class="panel" id="escalationsTable"></div>
       </section>
 
@@ -1156,6 +1565,19 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
         <div class="panel" id="viewingsTable"></div>
       </section>
 
+      <!-- الرسائل المرسلة -->
+      <section class="view" id="view-messages">
+        <div class="page-head">
+          <div>
+            <h2>الرسائل المرسلة</h2>
+            <p>حالة كل قالب أُرسل: أُرسلت، وصلت، قُرئت، وهل ردّ العميل.</p>
+          </div>
+        </div>
+        <div id="campaigns"></div>
+        <div class="chips" id="msgChips"></div>
+        <div class="panel" id="messagesTable"></div>
+      </section>
+
       <!-- إرسال قالب -->
       <section class="view" id="view-send">
         <div class="page-head">
@@ -1165,19 +1587,25 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
           </div>
         </div>
 
-        <div class="notice">تُحتسب رسائل العروض لدى Meta كرسائل تسويقية بتكلفة على كل رسالة، فأرسلها إلى العملاء المهتمين فقط.</div>
+        <div class="notice">تُحتسب رسائل العروض لدى Meta كرسائل تسويقية بتكلفة على كل رسالة، فأرسلها إلى العملاء المهتمين فقط. وقد يكون لحسابك حدّ يومي لعدد العملاء الجدد، فتأكد منه في WhatsApp Manager قبل الإرسال الكبير.</div>
 
         <div class="send-grid">
           <div class="card">
             <label class="lbl" for="tplSelect">القالب</label>
             <select class="field" id="tplSelect"></select>
 
+            <label class="lbl" for="delay">الفاصل بين كل رسالة والتي بعدها</label>
+            <div class="delay-row">
+              <input class="field" id="delay" type="number" min="1" max="3600" value="8" inputmode="numeric">
+              <span>ثانية</span>
+            </div>
+
             <label class="lbl" for="numbers">أرقام العملاء</label>
             <textarea class="field" id="numbers" placeholder="0551234567&#10;0559876543"></textarea>
-            <div class="hint" id="numbersHint">اكتب كل رقم في سطر مستقل، بحد أقصى 200 رقم.</div>
+            <div class="hint" id="numbersHint">اكتب كل رقم في سطر مستقل.</div>
 
             <div class="row-actions">
-              <button class="btn" id="sendBtn">إرسال القالب</button>
+              <button class="btn" id="sendBtn">بدء الإرسال</button>
               <button class="btn btn-ghost" id="fillAll">إضافة كل العملاء</button>
             </div>
 
@@ -1253,17 +1681,157 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     return res.json();
   }
 
+  // ---------- علامات الصح ----------
+
+  const SVG_CLOCK = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.6V8l2.4 1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+  const SVG_ONE = '<svg viewBox="0 0 16 11" width="16" height="11" aria-hidden="true"><path d="M1.5 6.2l3.1 3.1L11.2 2.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const SVG_TWO = '<svg viewBox="0 0 16 11" width="16" height="11" aria-hidden="true"><path d="M0.8 6.2l3.1 3.1L10.5 2.2M5.6 8.4l.9.9L15.2 2.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const SVG_X = '<svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
+  const SVG_DASH = '<svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true"><path d="M3 7h8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
+
+  const TICK = {
+    queued:    { svg: SVG_CLOCK, label: 'في الانتظار', cls: 'queued' },
+    sending:   { svg: SVG_CLOCK, label: 'جارٍ الإرسال', cls: 'queued' },
+    sent:      { svg: SVG_ONE,   label: 'أُرسلت', cls: 'sent' },
+    delivered: { svg: SVG_TWO,   label: 'وصلت', cls: 'delivered' },
+    read:      { svg: SVG_TWO,   label: 'قُرئت', cls: 'read' },
+    failed:    { svg: SVG_X,     label: 'فشلت', cls: 'failed' },
+    cancelled: { svg: SVG_DASH,  label: 'أُلغيت', cls: 'cancelled' },
+  };
+
+  function ticks(status, withLabel) {
+    const t = TICK[status];
+    if (!t) return '';
+    return '<span class="ticks ' + t.cls + '" title="' + esc(t.label) + '">' + t.svg +
+      (withLabel ? '<span>' + esc(t.label) + '</span>' : '') + '</span>';
+  }
+
+  // ---------- الخانات والألوان ----------
+
+  const VIEW_NAMES = {
+    overview: 'نظرة عامة',
+    customers: 'العملاء',
+    escalations: 'طلبات المدير',
+    viewings: 'طلبات المعاينة',
+    messages: 'الرسائل المرسلة',
+    send: 'إرسال قالب',
+  };
+
+  const CUSTOMER_FILTERS = [
+    ['all', 'الكل'],
+    ['today', 'راسلوا اليوم'],
+    ['hot', 'جاهزون للشراء'],
+    ['viewing', 'لديهم طلب معاينة'],
+    ['escalated', 'حُوِّلوا للمدير'],
+  ];
+
+  const ESC_FILTERS = [
+    ['all', 'الكل'],
+    ['hot', 'جاهزون للشراء'],
+  ];
+
+  const MSG_FILTERS = [
+    ['all', 'الكل'],
+    ['queued', 'في الانتظار'],
+    ['reached', 'وصلت'],
+    ['delivered', 'وصلت ولم تُقرأ'],
+    ['read', 'قُرئت'],
+    ['noreply', 'لم يردّوا'],
+    ['readnoreply', 'قرأوا ولم يردّوا'],
+    ['replied', 'ردّوا'],
+    ['failed', 'فشلت'],
+  ];
+
+  const CAMPAIGN_LABELS = {
+    running: 'قيد الإرسال',
+    paused: 'متوقفة مؤقتًا',
+    done: 'اكتملت',
+    cancelled: 'أُلغيت',
+  };
+
+  const filters = { customers: 'all', escalations: 'all', messages: 'all' };
+
+  let currentView = 'overview';
+  let msgCampaign = null;
+  let customers = [];
+  let escalationsData = [];
+  let messagesData = [];
+  let campaignsData = [];
+  let templates = [];
+  let maxNumbers = 500;
+  let defaultDelay = 8;
+
+  function setView(view) {
+    currentView = view;
+    document.body.dataset.view = view;
+
+    document.querySelectorAll('nav button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.view === view);
+    });
+
+    document.querySelectorAll('section.view').forEach((x) => {
+      x.classList.toggle('active', x.id === 'view-' + view);
+    });
+
+    $('#crumbName').textContent = VIEW_NAMES[view] || '';
+    window.scrollTo(0, 0);
+  }
+
+  function go(view, filter) {
+    if (filters[view] !== undefined) {
+      filters[view] = filter || 'all';
+    }
+
+    if (view === 'messages' && (!filter || filter === 'all')) {
+      msgCampaign = null;
+    }
+
+    setView(view);
+
+    if (view === 'customers') renderCustomers();
+    if (view === 'escalations') renderEscalations();
+    if (view === 'messages') loadMessagesView().catch(() => {});
+  }
+
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest ? e.target.closest('[data-go]') : null;
+    if (el) go(el.dataset.go, el.dataset.filter || '');
+  });
+
+  function renderChips(el, defs, current, onPick) {
+    el.innerHTML = defs
+      .map((d) => '<button type="button" class="chip' + (d[0] === current ? ' active' : '') + '" data-f="' + esc(d[0]) + '">' + esc(d[1]) + '</button>')
+      .join('');
+
+    el.querySelectorAll('.chip').forEach((b) => {
+      b.addEventListener('click', () => onPick(b.dataset.f));
+    });
+  }
+
   // ---------- Login ----------
+
+  let refreshTimer = null;
 
   function showLogin() {
     $('#app').style.display = 'none';
     $('#login').style.display = 'grid';
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
   }
 
   function showApp() {
     $('#login').style.display = 'none';
     $('#app').style.display = 'block';
+    setView('overview');
     refreshAll();
+
+    // تحديث تلقائي كل 15 ثانية: العميل اللي راسل يطلع لفوق وعلامات الصح تتحدث لوحدها
+    if (!refreshTimer) {
+      refreshTimer = setInterval(() => {
+        if ($('#app').style.display === 'block' && document.visibilityState === 'visible') {
+          refreshQuiet();
+        }
+      }, 15000);
+    }
   }
 
   $('#loginForm').addEventListener('submit', async (e) => {
@@ -1294,17 +1862,15 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   // ---------- Navigation ----------
 
   document.querySelectorAll('nav button').forEach((b) => {
-    b.addEventListener('click', () => {
-      document.querySelectorAll('nav button').forEach((x) => x.classList.remove('active'));
-      document.querySelectorAll('section.view').forEach((x) => x.classList.remove('active'));
-      b.classList.add('active');
-      $('#view-' + b.dataset.view).classList.add('active');
-    });
+    b.addEventListener('click', () => go(b.dataset.view, ''));
   });
 
-  // ---------- Data ----------
+  // ---------- Overview ----------
 
-  let customers = [];
+  function cell(label, value, view, filter, cls, icon) {
+    return '<button type="button" class="cell ' + (cls || '') + '" data-go="' + esc(view) + '" data-filter="' + esc(filter || '') + '">' +
+      '<b>' + esc(value) + '</b><span>' + (icon || '') + esc(label) + '</span></button>';
+  }
 
   async function loadStats() {
     const s = await api('/admin/api/stats');
@@ -1312,20 +1878,28 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     $('#nCustomers').textContent = s.customers;
     $('#nViewings').textContent = s.viewings;
     $('#nHot').textContent = s.hotLeads;
+    $('#nNoReply').textContent = s.templates.noReply;
 
-    const cells = [
-      ['عملاء راسلوا البوت', s.customers, ''],
-      ['عملاء اليوم', s.activeToday, ''],
-      ['رسائل اليوم', s.messagesToday, ''],
-      ['طلبات المعاينة', s.viewings, ''],
-      ['التحويلات إلى المدير', s.escalations, ''],
-      ['جاهزون للشراء', s.hotLeads, 'is-hot'],
-    ];
+    $('#ledger').innerHTML =
+      cell('عملاء راسلوا البوت', s.customers, 'customers', 'all') +
+      cell('عملاء راسلوا اليوم', s.activeToday, 'customers', 'today') +
+      cell('رسائل اليوم', s.messagesToday, 'customers', 'today') +
+      cell('طلبات المعاينة', s.viewings, 'viewings', '') +
+      cell('التحويلات إلى المدير', s.escalations, 'escalations', 'all') +
+      cell('جاهزون للشراء', s.hotLeads, 'escalations', 'hot', 'is-hot');
 
-    $('#ledger').innerHTML = cells
-      .map((c) => '<div class="' + c[2] + '"><b>' + esc(c[1]) + '</b><span>' + esc(c[0]) + '</span></div>')
-      .join('');
+    const t = s.templates;
+
+    $('#ledger2').innerHTML =
+      cell('قوالب أُرسلت', t.accepted, 'messages', 'all', '', ticks('sent')) +
+      cell('وصلت للعميل', t.reached, 'messages', 'reached', '', ticks('delivered')) +
+      cell('قرأها العميل', t.read, 'messages', 'read', '', ticks('read')) +
+      cell('لم يردّوا عليها', t.noReply, 'messages', 'noreply', '') +
+      cell('قرأوا ولم يردّوا', t.readNoReply, 'messages', 'readnoreply', '', ticks('read')) +
+      cell('فشلت', t.failed, 'messages', 'failed', 'is-bad', ticks('failed'));
   }
+
+  // ---------- Customers ----------
 
   function tags(c) {
     let t = '';
@@ -1335,24 +1909,38 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     return t;
   }
 
-  async function loadCustomers() {
-    const q = $('#search').value.trim();
-    customers = await api('/admin/api/customers' + (q ? '?search=' + encodeURIComponent(q) : ''));
+  function customerMatches(c, f) {
+    if (f === 'today') return c.active_today;
+    if (f === 'hot') return c.hot;
+    if (f === 'viewing') return c.has_viewing;
+    if (f === 'escalated') return c.escalated;
+    return true;
+  }
 
-    if (!customers.length) {
+  function renderCustomers() {
+    renderChips($('#customerChips'), CUSTOMER_FILTERS, filters.customers, (f) => {
+      filters.customers = f;
+      renderCustomers();
+    });
+
+    const q = $('#search').value.trim();
+    const rows = customers.filter((c) => customerMatches(c, filters.customers));
+
+    if (!rows.length) {
       $('#customersTable').innerHTML =
-        '<div class="empty">' + (q ? 'لا توجد نتائج لهذا البحث.' : 'سيظهر العملاء هنا عند مراسلة أول عميل للبوت.') + '</div>';
+        '<div class="empty">' + (q || filters.customers !== 'all' ? 'لا توجد نتائج مطابقة.' : 'سيظهر العملاء هنا عند مراسلة أول عميل للبوت.') + '</div>';
       return;
     }
 
     $('#customersTable').innerHTML =
-      '<table><thead><tr><th>العميل</th><th>آخر رسالة</th><th>عدد رسائله</th><th>آخر نشاط</th><th></th></tr></thead><tbody>' +
-      customers.map((c) =>
+      '<table><thead><tr><th>العميل</th><th>آخر رسالة</th><th>آخر قالب</th><th>عدد رسائله</th><th>آخر نشاط</th><th></th></tr></thead><tbody>' +
+      rows.map((c) =>
         '<tr class="clickable" data-phone="' + esc(c.customer_phone) + '">' +
           '<td><span class="ltr">' + esc(localPhone(c.customer_phone)) + '</span><br>' + tags(c) + '</td>' +
           '<td><div class="snippet">' + esc(c.last_message || 'وصله قالب ولم يردّ') + '</div></td>' +
+          '<td>' + (c.last_tpl_status ? ticks(c.last_tpl_status, true) : '<span class="muted">—</span>') + '</td>' +
           '<td>' + esc(c.user_messages) + '</td>' +
-          '<td>' + esc(fmt(c.last_at)) + '</td>' +
+          '<td>' + esc(fmt(c.last_user_at || c.last_at)) + '</td>' +
           '<td><a class="wa" target="_blank" rel="noopener" href="https://wa.me/' + esc(c.customer_phone) + '" onclick="event.stopPropagation()">واتساب</a></td>' +
         '</tr>'
       ).join('') +
@@ -1363,34 +1951,59 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     });
   }
 
-  async function loadEscalations() {
-    const rows = await api('/admin/api/escalations');
+  async function loadCustomers() {
+    const q = $('#search').value.trim();
+    customers = await api('/admin/api/customers' + (q ? '?search=' + encodeURIComponent(q) : ''));
+    renderCustomers();
+  }
 
-    const table = (list, emptyText) => {
-      if (!list.length) return '<div class="empty">' + emptyText + '</div>';
-      return '<div class="panel" style="border:0"><table><thead><tr><th>العميل</th><th>الطلب</th><th>أُبلغ المدير؟</th><th>الوقت</th><th></th></tr></thead><tbody>' +
-        list.map((r) =>
-          '<tr class="clickable" data-phone="' + esc(r.customer_phone) + '">' +
-            '<td><span class="ltr">' + esc(localPhone(r.customer_phone)) + '</span>' + (r.hot ? '<br><span class="tag hot">احجز شراء</span>' : '') + '</td>' +
-            '<td><div class="snippet">' + esc(r.question) + '</div></td>' +
-            '<td>' + (r.manager_notified ? 'نعم' : 'لا') + '</td>' +
-            '<td>' + esc(fmt(r.created_at)) + '</td>' +
-            '<td><a class="wa" target="_blank" rel="noopener" href="https://wa.me/' + esc(r.customer_phone) + '" onclick="event.stopPropagation()">واتساب</a></td>' +
-          '</tr>'
-        ).join('') +
-        '</tbody></table></div>';
-    };
+  // ---------- Escalations ----------
 
-    $('#escalationsTable').innerHTML = table(rows, 'لا توجد طلبات للمدير حتى الآن.');
+  function escalationTable(list, emptyText) {
+    if (!list.length) return '<div class="empty">' + emptyText + '</div>';
+    return '<div class="panel" style="border:0"><table><thead><tr><th>العميل</th><th>الطلب</th><th>أُبلغ المدير؟</th><th>الوقت</th><th></th></tr></thead><tbody>' +
+      list.map((r) =>
+        '<tr class="clickable" data-phone="' + esc(r.customer_phone) + '">' +
+          '<td><span class="ltr">' + esc(localPhone(r.customer_phone)) + '</span>' + (r.hot ? '<br><span class="tag hot">احجز شراء</span>' : '') + '</td>' +
+          '<td><div class="snippet">' + esc(r.question) + '</div></td>' +
+          '<td>' + (r.manager_notified ? 'نعم' : 'لا') + '</td>' +
+          '<td>' + esc(fmt(r.created_at)) + '</td>' +
+          '<td><a class="wa" target="_blank" rel="noopener" href="https://wa.me/' + esc(r.customer_phone) + '" onclick="event.stopPropagation()">واتساب</a></td>' +
+        '</tr>'
+      ).join('') +
+      '</tbody></table></div>';
+  }
+
+  function renderEscalations() {
+    renderChips($('#escChips'), ESC_FILTERS, filters.escalations, (f) => {
+      filters.escalations = f;
+      renderEscalations();
+    });
+
+    const list = filters.escalations === 'hot'
+      ? escalationsData.filter((r) => r.hot)
+      : escalationsData;
+
+    $('#escalationsTable').innerHTML = escalationTable(
+      list,
+      filters.escalations === 'hot' ? 'لا يوجد عملاء ضغطوا على «احجز شراء» حتى الآن.' : 'لا توجد طلبات للمدير حتى الآن.'
+    );
 
     const seen = new Set();
-    const hot = rows.filter((r) => r.hot && !seen.has(r.customer_phone) && seen.add(r.customer_phone));
-    $('#hotTable').innerHTML = table(hot, 'لا يوجد عملاء ضغطوا على «احجز شراء» حتى الآن.');
+    const hot = escalationsData.filter((r) => r.hot && !seen.has(r.customer_phone) && seen.add(r.customer_phone));
+    $('#hotTable').innerHTML = escalationTable(hot, 'لا يوجد عملاء ضغطوا على «احجز شراء» حتى الآن.');
 
     document.querySelectorAll('#escalationsTable tr.clickable, #hotTable tr.clickable').forEach((tr) => {
       tr.addEventListener('click', () => openConversation(tr.dataset.phone));
     });
   }
+
+  async function loadEscalations() {
+    escalationsData = await api('/admin/api/escalations');
+    renderEscalations();
+  }
+
+  // ---------- Viewings ----------
 
   async function loadViewings() {
     const rows = await api('/admin/api/viewings');
@@ -1419,6 +2032,108 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
     });
   }
 
+  // ---------- Sent messages + campaigns ----------
+
+  function renderCampaigns() {
+    const shown = campaignsData.slice(0, 6);
+
+    if (!shown.length) {
+      $('#campaigns').innerHTML = '';
+      return;
+    }
+
+    $('#campaigns').innerHTML = shown.map((c) => {
+      const done = c.total - c.queued - c.cancelled;
+      const pct = c.total ? Math.round(done * 100 / c.total) : 0;
+      const active = c.status === 'running' || c.status === 'paused';
+
+      let buttons = '<button type="button" class="btn btn-ghost btn-small" data-camp-pick="' + c.id + '">' + (msgCampaign === c.id ? 'عرض كل الرسائل' : 'عرض رسائل هذه الحملة') + '</button>';
+      if (c.status === 'running') buttons += '<button type="button" class="btn btn-ghost btn-small" data-camp="' + c.id + '" data-action="pause">إيقاف مؤقت</button>';
+      if (c.status === 'paused') buttons += '<button type="button" class="btn btn-small" data-camp="' + c.id + '" data-action="resume">استئناف</button>';
+      if (active) buttons += '<button type="button" class="btn btn-danger btn-small" data-camp="' + c.id + '" data-action="cancel">إلغاء الباقي</button>';
+
+      return '<div class="camp ' + esc(c.status) + (msgCampaign === c.id ? ' picked' : '') + '">' +
+        '<div class="camp-top">' +
+          '<div><span class="camp-title">حملة #' + esc(c.id) + ' — ' + esc(c.template_name) + '</span>' +
+          '<span class="camp-status">' + esc(CAMPAIGN_LABELS[c.status] || c.status) + '</span></div>' +
+          '<div class="muted">' + esc(done) + ' من ' + esc(c.total) + ' — رسالة كل ' + esc(c.delay_seconds) + ' ثانية</div>' +
+        '</div>' +
+        '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
+        '<div class="camp-stats">' +
+          '<span>' + ticks('sent', true) + ' ' + esc(c.sent) + '</span>' +
+          '<span>' + ticks('delivered', true) + ' ' + esc(c.delivered) + '</span>' +
+          '<span>' + ticks('read', true) + ' ' + esc(c.read_count) + '</span>' +
+          '<span>' + ticks('failed', true) + ' ' + esc(c.failed) + '</span>' +
+          (c.queued ? '<span>' + ticks('queued', true) + ' ' + esc(c.queued) + '</span>' : '') +
+        '</div>' +
+        '<div class="camp-actions">' + buttons + '</div>' +
+      '</div>';
+    }).join('');
+
+    document.querySelectorAll('[data-camp-pick]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const id = Number(b.dataset.campPick);
+        msgCampaign = msgCampaign === id ? null : id;
+        loadMessagesView().catch(() => {});
+      });
+    });
+
+    document.querySelectorAll('[data-camp][data-action]').forEach((b) => {
+      b.addEventListener('click', async () => {
+        if (b.dataset.action === 'cancel' && !confirm('هل تريد إلغاء الرسائل المتبقية في هذه الحملة؟ الرسائل التي أُرسلت لن تتأثر.')) return;
+        await api('/admin/api/campaigns/' + b.dataset.camp + '/' + b.dataset.action, { method: 'POST' });
+        loadMessagesView().catch(() => {});
+        loadStats().catch(() => {});
+      });
+    });
+  }
+
+  function renderMessages() {
+    renderChips($('#msgChips'), MSG_FILTERS, filters.messages, (f) => {
+      filters.messages = f;
+      loadMessagesView().catch(() => {});
+    });
+
+    if (!messagesData.length) {
+      $('#messagesTable').innerHTML = '<div class="empty">لا توجد رسائل مطابقة.</div>';
+      return;
+    }
+
+    $('#messagesTable').innerHTML =
+      '<table><thead><tr><th>العميل</th><th>القالب</th><th>الحالة</th><th>آخر تحديث</th><th>ردّ العميل</th><th></th></tr></thead><tbody>' +
+      messagesData.map((r) =>
+        '<tr class="clickable" data-phone="' + esc(r.customer_phone) + '">' +
+          '<td><span class="ltr">' + esc(localPhone(r.customer_phone)) + '</span></td>' +
+          '<td>' + esc(r.template_name) + '</td>' +
+          '<td>' + ticks(r.status, true) +
+            (r.status === 'failed' && (r.error_text || r.error_code)
+              ? '<div class="why">' + esc((r.error_code ? '(' + r.error_code + ') ' : '') + String(r.error_text || '').slice(0, 140)) + '</div>'
+              : '') +
+          '</td>' +
+          '<td>' + esc(fmt(r.read_at || r.delivered_at || r.sent_at || r.failed_at || r.queued_at)) + '</td>' +
+          '<td>' + (r.replied ? '<span class="tag replied">ردّ</span>' : '<span class="muted">—</span>') + '</td>' +
+          '<td><a class="wa" target="_blank" rel="noopener" href="https://wa.me/' + esc(r.customer_phone) + '" onclick="event.stopPropagation()">واتساب</a></td>' +
+        '</tr>'
+      ).join('') +
+      '</tbody></table>';
+
+    document.querySelectorAll('#messagesTable tr.clickable').forEach((tr) => {
+      tr.addEventListener('click', () => openConversation(tr.dataset.phone));
+    });
+  }
+
+  async function loadMessagesView() {
+    const [campaigns, rows] = await Promise.all([
+      api('/admin/api/campaigns'),
+      api('/admin/api/template-messages?filter=' + encodeURIComponent(filters.messages) + (msgCampaign ? '&campaign=' + msgCampaign : '')),
+    ]);
+
+    campaignsData = campaigns;
+    messagesData = rows;
+    renderCampaigns();
+    renderMessages();
+  }
+
   // ---------- Conversation ----------
 
   async function openConversation(phone) {
@@ -1434,7 +2149,9 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
       ? rows.map((m) => {
           const isTpl = m.role === 'assistant' && String(m.message || '').startsWith('[قالب');
           const cls = isTpl ? 'template' : (m.role === 'assistant' ? 'assistant' : 'user');
-          return '<div class="msg ' + cls + '">' + esc(m.message) + '<time>' + esc(fmt(m.created_at)) + '</time></div>';
+          const status = m.tm_status ? ticks(m.tm_status, true) : '';
+          const why = m.tm_status === 'failed' && m.tm_error ? '<span class="why">' + esc(String(m.tm_error).slice(0, 120)) + '</span>' : '';
+          return '<div class="msg ' + cls + '">' + esc(m.message) + '<time><span>' + esc(fmt(m.created_at)) + '</span>' + status + why + '</time></div>';
         }).join('')
       : '<div class="empty">لا توجد رسائل.</div>';
 
@@ -1452,8 +2169,6 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
   // ---------- Send template ----------
 
-  let templates = [];
-
   async function loadTemplates() {
     templates = await api('/admin/api/templates');
 
@@ -1462,6 +2177,14 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
       .join('');
 
     showPreview();
+  }
+
+  async function loadConfig() {
+    const cfg = await api('/admin/api/config');
+    maxNumbers = cfg.maxNumbers;
+    defaultDelay = cfg.defaultDelay;
+    if (!$('#delay').dataset.touched) $('#delay').value = defaultDelay;
+    updateSendHint();
   }
 
   function showPreview() {
@@ -1473,61 +2196,115 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
   $('#tplSelect').addEventListener('change', showPreview);
 
-  function countNumbers() {
-    const n = $('#numbers').value.split(/[\n,،]+/).map((x) => x.trim()).filter(Boolean).length;
-    $('#numbersHint').textContent = n ? n + ' رقم (بحد أقصى 200 رقم في المرة الواحدة).' : 'اكتب كل رقم في سطر مستقل، بحد أقصى 200 رقم.';
+  // نفس طريقة السيرفر في استخراج الأرقام (للعدّ والتقدير فقط)
+  function toEnglishDigits(t) {
+    return String(t || '')
+      .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+      .replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
   }
 
-  $('#numbers').addEventListener('input', countNumbers);
+  function toIntlSaudi(raw) {
+    let n = String(raw || '').replace(/\D/g, '');
+    if (n.startsWith('00')) n = n.slice(2);
+    if (/^05\d{8}$/.test(n)) return '966' + n.slice(1);
+    if (/^5\d{8}$/.test(n)) return '966' + n;
+    if (/^9665\d{8}$/.test(n)) return n;
+    if (n.length >= 10 && n.length <= 15 && !n.startsWith('0')) return n;
+    return null;
+  }
+
+  function extractNumbersClient(text) {
+    const out = [];
+    const lines = toEnglishDigits(text).split(/[\n,،;؛]+/).map((l) => l.trim()).filter(Boolean);
+
+    for (const line of lines) {
+      const compact = line.replace(/[\s\-()]/g, '');
+      const whole = /^\+?\d{9,15}$/.test(compact) ? toIntlSaudi(compact) : null;
+      if (whole) { out.push(whole); continue; }
+      for (const token of line.split(/\s+/)) {
+        const n = toIntlSaudi(token);
+        if (n) out.push(n);
+      }
+    }
+
+    return [...new Set(out)];
+  }
+
+  function updateSendHint() {
+    const n = extractNumbersClient($('#numbers').value).length;
+    const delay = Math.max(1, Math.round(Number($('#delay').value) || defaultDelay));
+    const minutes = Math.max(1, Math.round(n * delay / 60));
+
+    $('#numbersHint').textContent = n
+      ? n + ' رقم، والمدة المتوقعة نحو ' + minutes + ' دقيقة (بحد أقصى ' + maxNumbers + ' رقم في الحملة).'
+      : 'اكتب كل رقم في سطر مستقل، بحد أقصى ' + maxNumbers + ' رقم في الحملة.';
+  }
+
+  $('#numbers').addEventListener('input', updateSendHint);
+  $('#delay').addEventListener('input', () => { $('#delay').dataset.touched = '1'; updateSendHint(); });
 
   $('#fillAll').addEventListener('click', async () => {
     if (!customers.length) await loadCustomers();
     $('#numbers').value = customers.map((c) => localPhone(c.customer_phone)).join('\n');
-    countNumbers();
+    updateSendHint();
   });
 
   $('#sendBtn').addEventListener('click', async () => {
-    const numbers = $('#numbers').value.split(/[\n,،]+/).map((x) => x.trim()).filter(Boolean);
+    const text = $('#numbers').value;
     const key = $('#tplSelect').value;
+    const delay = Math.max(1, Math.round(Number($('#delay').value) || defaultDelay));
+    const count = extractNumbersClient(text).length;
+    const box = $('#sendResult');
 
-    if (!numbers.length) {
-      $('#sendResult').style.display = 'block';
-      $('#sendResult').textContent = 'اكتب رقمًا واحدًا على الأقل.';
+    box.style.display = 'block';
+    box.textContent = '';
+
+    if (!count) {
+      box.textContent = 'اكتب رقمًا واحدًا على الأقل.';
       return;
     }
 
-    if (!confirm('هل تريد إرسال القالب «' + key + '» إلى ' + numbers.length + ' رقم؟')) return;
+    if (!confirm('هل تريد إرسال القالب «' + key + '» إلى ' + count + ' رقم، بفاصل ' + delay + ' ثانية بين كل رسالة؟')) return;
 
     $('#sendBtn').disabled = true;
-    $('#sendBtn').textContent = 'جارٍ الإرسال...';
-    $('#sendResult').style.display = 'block';
-    $('#sendResult').textContent = 'جارٍ الإرسال، لا تغلق الصفحة...';
+    box.textContent = 'جارٍ جدولة الإرسال...';
 
     try {
-      const r = await api('/admin/api/send-template', {
+      const r = await api('/admin/api/campaigns', {
         method: 'POST',
-        body: JSON.stringify({ templateKey: key, numbers }),
+        body: JSON.stringify({ templateKey: key, numbersText: text, delaySeconds: delay }),
       });
 
       if (r.error) {
         const msgs = {
           no_numbers: 'لم يتم العثور على أرقام صحيحة. اكتبها بصيغة 0551234567.',
-          too_many_numbers: 'العدد يتجاوز 200 رقم. قسّم الأرقام على أكثر من دفعة.',
+          too_many_numbers: 'العدد يتجاوز ' + maxNumbers + ' رقم. قسّم الأرقام على أكثر من حملة.',
           unknown_template: 'القالب غير موجود.',
         };
-        $('#sendResult').textContent = msgs[r.error] || 'حدث خطأ. حاول مرة أخرى.';
+        box.textContent = msgs[r.error] || 'حدث خطأ. حاول مرة أخرى.';
       } else {
-        let text = 'تم الإرسال إلى: ' + r.sent.length + '\nتعذّر الإرسال إلى: ' + r.failed.length;
-        if (r.failed.length) text += '\n\nالأرقام التي تعذّر الإرسال إليها:\n' + r.failed.join('\n');
-        $('#sendResult').textContent = text;
-        refreshAll();
+        const minutes = Math.max(1, Math.round(r.total * r.delaySeconds / 60));
+        box.innerHTML = '';
+        const line = document.createElement('div');
+        line.textContent = 'تمت جدولة الإرسال: ' + r.total + ' رقم، رسالة كل ' + r.delaySeconds + ' ثانية (نحو ' + minutes + ' دقيقة). يمكنك إغلاق الصفحة، فالإرسال يكمل تلقائيًا على السيرفر.';
+        box.appendChild(line);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-ghost btn-small';
+        btn.style.marginTop = '10px';
+        btn.dataset.go = 'messages';
+        btn.dataset.filter = 'all';
+        btn.textContent = 'متابعة التقدم';
+        box.appendChild(btn);
+        $('#numbers').value = '';
+        updateSendHint();
+        loadStats().catch(() => {});
       }
     } catch (e) {
-      $('#sendResult').textContent = 'انقطع الاتصال. تأكد من الإنترنت وحاول مرة أخرى.';
+      box.textContent = 'انقطع الاتصال. تأكد من الإنترنت وحاول مرة أخرى.';
     }
 
     $('#sendBtn').disabled = false;
-    $('#sendBtn').textContent = 'إرسال القالب';
   });
 
   // ---------- Init ----------
@@ -1535,7 +2312,7 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
   let searchTimer;
   $('#search').addEventListener('input', () => {
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(loadCustomers, 350);
+    searchTimer = setTimeout(() => loadCustomers().catch(() => {}), 350);
   });
 
   $('#todayLabel').textContent = new Date().toLocaleDateString('ar-SA-u-ca-gregory-nu-latn', {
@@ -1544,9 +2321,20 @@ const DASHBOARD_HTML = String.raw`<!doctype html>
 
   async function refreshAll() {
     try {
-      await Promise.all([loadStats(), loadCustomers(), loadEscalations(), loadViewings(), loadTemplates()]);
+      await Promise.all([loadStats(), loadCustomers(), loadEscalations(), loadViewings(), loadTemplates(), loadConfig(), loadMessagesView()]);
     } catch (e) { /* login handled in api() */ }
   }
+
+  // التحديث التلقائي: ما يلمس خانة الإرسال ولا اللي أنت بتكتبه
+  async function refreshQuiet() {
+    try {
+      const jobs = [loadStats(), loadCustomers(), loadEscalations(), loadViewings()];
+      if (currentView === 'messages') jobs.push(loadMessagesView());
+      await Promise.all(jobs);
+    } catch (e) { /* ignore */ }
+  }
+
+  $('#refreshBtn').addEventListener('click', refreshAll);
 
   fetch('/admin/api/me', { credentials: 'same-origin' })
     .then((r) => r.json())
