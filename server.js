@@ -124,8 +124,15 @@ const TEMPLATES = {
   },
 };
 
-// أقصى عدد أرقام في الأمر الواحد
-const MAX_NUMBERS_PER_COMMAND = 50;
+// أقصى عدد أرقام في أمر واتساب الواحد
+const MAX_NUMBERS_PER_COMMAND = 200;
+
+// الفاصل الافتراضي بين رسالة والتي بعدها (بالثواني) عند إرسال القوالب
+const DEFAULT_SEND_DELAY_SECONDS =
+  Number(process.env.DEFAULT_SEND_DELAY_SECONDS) || 8;
+
+// أقصى عدد أرقام في الحملة الواحدة من اللوحة
+const MAX_NUMBERS_PER_CAMPAIGN = 500;
 
 
 // ما نزعج المدير بنفس العميل أكثر من مرة كل 30 دقيقة
@@ -224,6 +231,61 @@ async function initializeDatabase() {
       manager_notified BOOLEAN DEFAULT false,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+  `);
+
+  // حملات إرسال القوالب (رسالة كل X ثانية في الخلفية)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id SERIAL PRIMARY KEY,
+      template_key VARCHAR(50) NOT NULL,
+      template_name VARCHAR(100) NOT NULL,
+      delay_seconds INT NOT NULL DEFAULT 8,
+      status VARCHAR(20) NOT NULL DEFAULT 'running',
+      notify_phone VARCHAR(30),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      finished_at TIMESTAMP
+    );
+  `);
+
+  // كل رسالة قالب (في الطابور أو مرسلة) وحالتها: أُرسلت / وصلت / قُرئت / فشلت
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS template_messages (
+      id SERIAL PRIMARY KEY,
+      campaign_id INT,
+      customer_phone VARCHAR(30) NOT NULL,
+      template_key VARCHAR(50),
+      template_name VARCHAR(100),
+      status VARCHAR(20) NOT NULL DEFAULT 'queued',
+      wamid TEXT,
+      error_code INT,
+      error_text TEXT,
+      queued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      sent_at TIMESTAMP,
+      delivered_at TIMESTAMP,
+      read_at TIMESTAMP,
+      failed_at TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_template_messages_phone
+    ON template_messages(customer_phone);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_template_messages_wamid
+    ON template_messages(wamid);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_template_messages_campaign
+    ON template_messages(campaign_id, status);
+  `);
+
+  // ربط رسالة القالب في المحادثة بحالتها (لعرض علامات الصح)
+  await pool.query(`
+    ALTER TABLE conversations
+    ADD COLUMN IF NOT EXISTS template_msg_id INT;
   `);
 
   console.log(
@@ -518,6 +580,108 @@ function handleStatusUpdate(
 
   console.log(
     `${labels[status.status] || status.status}: ${who}${templateLabel}${category}`
+  );
+}
+
+
+// نخزّن حالة رسالة القالب في قاعدة البيانات (لعرض علامات الصح في اللوحة)
+const STATUS_RANK = {
+  sent: 1,
+  delivered: 2,
+  read: 3,
+};
+
+async function persistStatus(
+  status
+) {
+
+  if (!status || !status.id) {
+    return;
+  }
+
+  if (status.status === 'failed') {
+
+    const err =
+      (status.errors && status.errors[0]) ||
+      {};
+
+    const text =
+      [
+        err.title,
+        err.error_data?.details || err.message,
+      ]
+        .filter(Boolean)
+        .join(' — ')
+        .slice(0, 500);
+
+    await pool.query(
+      `
+      UPDATE template_messages
+      SET status = 'failed',
+          error_code = $2,
+          error_text = $3,
+          failed_at = CURRENT_TIMESTAMP
+      WHERE wamid = $1
+        AND status IN ('queued', 'sending', 'sent')
+      `,
+      [
+        status.id,
+        err.code || null,
+        text,
+      ]
+    );
+
+    return;
+  }
+
+  const rank =
+    STATUS_RANK[status.status];
+
+  if (!rank) {
+    return;
+  }
+
+  const column = {
+    sent: 'sent_at',
+    delivered: 'delivered_at',
+    read: 'read_at',
+  }[status.status];
+
+  const epoch =
+    Number(status.timestamp) || null;
+
+  // الحالة ما ترجع لورا أبدًا (مثلًا "قُرئت" ما تتحول لـ "وصلت" لو الإشعارات وصلت مبعثرة)
+  await pool.query(
+    `
+    UPDATE template_messages
+    SET status = CASE
+          WHEN $2::int > CASE status
+                           WHEN 'sent' THEN 1
+                           WHEN 'delivered' THEN 2
+                           WHEN 'read' THEN 3
+                           ELSE 0
+                         END
+          THEN $3::text
+          ELSE status
+        END,
+        ${column} = COALESCE(
+          ${column},
+          to_timestamp(
+            COALESCE(
+              $4::double precision,
+              EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+            )
+          )
+        )
+    WHERE wamid = $1
+      AND status <> 'failed'
+    `,
+    [
+      status.id,
+      rank,
+      status.status,
+      epoch,
+    ]
   );
 }
 
@@ -1066,7 +1230,8 @@ async function describeSticker(
 async function saveConversation(
   customerPhone,
   role,
-  message
+  message,
+  templateMsgId = null
 ) {
 
   try {
@@ -1077,9 +1242,10 @@ async function saveConversation(
       (
         customer_phone,
         role,
-        message
+        message,
+        template_msg_id
       )
-      VALUES ($1, $2, $3)
+      VALUES ($1, $2, $3, $4)
       `,
       [
         normalizePhone(
@@ -1091,6 +1257,8 @@ async function saveConversation(
         String(
           message || ''
         ),
+
+        templateMsgId,
       ]
     );
 
@@ -1733,6 +1901,8 @@ async function sendWhatsAppTemplate(
 
     return {
       ok: false,
+      code: details?.code || null,
+      detail: details?.message || null,
       error:
         details?.error_user_msg ||
         details?.message ||
@@ -1787,14 +1957,48 @@ function parseAdminCommand(
     return null;
   }
 
-  // كل سطر ممكن يكون فيه رقم واحد (حتى لو فيه مسافات)
-  // أو أكثر من رقم بينهم مسافات
+  return {
+    type: 'send_template',
+    templateKey: firstWord,
+    template,
+    numbers: extractNumbers(
+      rest.slice(firstWord.length)
+    ),
+  };
+}
+
+
+function adminHelpText() {
+
+  return (
+`📋 أوامر الإدارة
+
+📊 التقرير:
+${ADMIN_REPORT_CODE}
+
+📤 إرسال قالب لعميل أو أكثر:
+${ADMIN_REPORT_CODE} رونق 0551234567
+
+لأكثر من عميل، اكتب كل رقم في سطر أو بينهم مسافة (حتى ${MAX_NUMBERS_PER_COMMAND} رقم).
+الإرسال يتم في الخلفية: رسالة كل ${DEFAULT_SEND_DELAY_SECONDS} ثواني، وبيوصلك ملخص لما ينتهي.
+
+القوالب المتاحة:
+${Object.keys(TEMPLATES).join('، ')}`
+  );
+}
+
+
+// استخراج الأرقام من نص (كل رقم في سطر، أو أكثر من رقم بينهم مسافة أو فاصلة)
+function extractNumbers(text) {
+
+  const value =
+    convertDigitsToEnglish(text);
+
   const numbers = [];
 
   const lines =
-    rest
-      .slice(firstWord.length)
-      .split(/[\n,،;]+/)
+    value
+      .split(/[\n,،;؛]+/)
       .map((l) => l.trim())
       .filter(Boolean);
 
@@ -1824,77 +2028,432 @@ function parseAdminCommand(
     }
   }
 
+  return [...new Set(numbers)];
+}
+
+
+// =====================================================
+// طابور الإرسال (حملات القوالب)
+// الإرسال يتم في الخلفية على السيرفر: رسالة كل X ثانية،
+// ويكمل حتى لو قفلت اللوحة أو الصفحة.
+// =====================================================
+
+const sleep =
+  (ms) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+let wakeWorker = null;
+
+// انتظار قابل للإيقاظ: يُستخدم فقط لما الطابور فاضي
+function idleWait(ms) {
+
+  return new Promise((resolve) => {
+
+    const timer =
+      setTimeout(() => {
+        wakeWorker = null;
+        resolve();
+      }, ms);
+
+    wakeWorker = () => {
+      clearTimeout(timer);
+      wakeWorker = null;
+      resolve();
+    };
+  });
+}
+
+
+function clampDelaySeconds(value) {
+
+  const n =
+    Math.round(Number(value));
+
+  if (!Number.isFinite(n)) {
+    return DEFAULT_SEND_DELAY_SECONDS;
+  }
+
+  return Math.min(3600, Math.max(1, n));
+}
+
+
+async function createCampaign(
+  templateKey,
+  numbers,
+  options = {}
+) {
+
+  const template =
+    TEMPLATES[templateKey];
+
+  if (!template) {
+    throw new Error('unknown_template');
+  }
+
+  const list =
+    [...new Set(numbers || [])];
+
+  if (!list.length) {
+    throw new Error('no_numbers');
+  }
+
+  const delay =
+    clampDelaySeconds(
+      options.delaySeconds ?? DEFAULT_SEND_DELAY_SECONDS
+    );
+
+  const campaign =
+    await pool.query(
+      `
+      INSERT INTO campaigns
+      (
+        template_key,
+        template_name,
+        delay_seconds,
+        notify_phone
+      )
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+      `,
+      [
+        templateKey,
+        template.name,
+        delay,
+        options.notifyPhone
+          ? normalizePhone(options.notifyPhone)
+          : null,
+      ]
+    );
+
+  const campaignId =
+    campaign.rows[0].id;
+
+  await pool.query(
+    `
+    INSERT INTO template_messages
+    (
+      campaign_id,
+      customer_phone,
+      template_key,
+      template_name
+    )
+    SELECT $1::int, phone, $3::text, $4::text
+    FROM unnest($2::text[]) AS phone
+    `,
+    [
+      campaignId,
+      list,
+      templateKey,
+      template.name,
+    ]
+  );
+
+  console.log(
+    `🗓️ حملة #${campaignId}: قالب ${template.name} إلى ${list.length} رقم، رسالة كل ${delay} ثانية`
+  );
+
+  if (wakeWorker) {
+    wakeWorker();
+  }
+
   return {
-    type: 'send_template',
-    templateKey: firstWord,
-    template,
-    numbers: [...new Set(numbers)],
+    id: campaignId,
+    total: list.length,
+    delaySeconds: delay,
   };
 }
 
 
-function adminHelpText() {
+async function setCampaignStatus(
+  campaignId,
+  action
+) {
 
-  return (
-`📋 أوامر الإدارة
+  if (action === 'pause') {
 
-📊 التقرير:
-${ADMIN_REPORT_CODE}
+    await pool.query(
+      `UPDATE campaigns SET status = 'paused' WHERE id = $1 AND status = 'running'`,
+      [campaignId]
+    );
 
-📤 إرسال قالب لعميل أو أكثر:
-${ADMIN_REPORT_CODE} رونق 0551234567
+  } else if (action === 'resume') {
 
-لأكثر من عميل، اكتب كل رقم في سطر أو بينهم مسافة (حتى ${MAX_NUMBERS_PER_COMMAND} رقم).
+    await pool.query(
+      `UPDATE campaigns SET status = 'running' WHERE id = $1 AND status = 'paused'`,
+      [campaignId]
+    );
 
-القوالب المتاحة:
-${Object.keys(TEMPLATES).join('، ')}`
-  );
+    if (wakeWorker) {
+      wakeWorker();
+    }
+
+  } else if (action === 'cancel') {
+
+    await pool.query(
+      `
+      UPDATE campaigns
+      SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP
+      WHERE id = $1 AND status IN ('running', 'paused')
+      `,
+      [campaignId]
+    );
+
+    await pool.query(
+      `UPDATE template_messages SET status = 'cancelled' WHERE campaign_id = $1 AND status = 'queued'`,
+      [campaignId]
+    );
+
+  } else {
+
+    throw new Error('unknown_action');
+  }
 }
 
 
-// إرسال قالب لمجموعة أرقام (يستخدمه أمر الواتساب والداشبورد)
-async function sendTemplateToNumbers(
-  template,
-  numbers
-) {
+// نحجز الرسالة التالية في الطابور (حجز واحد فقط حتى لو فيه أكثر من نسخة من السيرفر)
+async function claimNextMessage() {
 
-  const sent = [];
-  const failed = [];
+  const result =
+    await pool.query(`
+      UPDATE template_messages
+      SET status = 'sending'
+      WHERE id = (
+        SELECT tm.id
+        FROM template_messages tm
+        JOIN campaigns c ON c.id = tm.campaign_id
+        WHERE tm.status = 'queued'
+          AND c.status = 'running'
+        ORDER BY tm.id
+        LIMIT 1
+        FOR UPDATE OF tm SKIP LOCKED
+      )
+      AND status = 'queued'
+      RETURNING
+        id,
+        campaign_id,
+        customer_phone,
+        template_key,
+        template_name,
+        (
+          SELECT delay_seconds
+          FROM campaigns
+          WHERE id = template_messages.campaign_id
+        ) AS delay_seconds
+    `);
 
-  for (const number of numbers) {
+  return result.rows[0] || null;
+}
 
-    const result =
-      await sendWhatsAppTemplate(
-        number,
-        template
-      );
 
-    if (result.ok) {
+async function processQueuedMessage(job) {
 
-      sent.push(number);
+  const template =
+    TEMPLATES[job.template_key];
 
-      // نحفظ في محادثة العميل عشان البوت يعرف إنه وصله العرض
-      await saveConversation(
-        number,
-        'assistant',
-        template.logText ||
-          `[قالب مرسل: ${template.name}]`
-      );
+  if (!template) {
 
-    } else {
+    await pool.query(
+      `
+      UPDATE template_messages
+      SET status = 'failed',
+          error_text = $2,
+          failed_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      `,
+      [job.id, 'القالب غير موجود في السيرفر']
+    );
 
-      failed.push(`${number} (${result.error})`);
-    }
-
-    // مهلة بسيطة بين كل رسالة
-    await new Promise((r) => setTimeout(r, 400));
+    return;
   }
 
+  const result =
+    await sendWhatsAppTemplate(
+      job.customer_phone,
+      template
+    );
+
+  if (result.ok) {
+
+    await pool.query(
+      `
+      UPDATE template_messages
+      SET status = 'sent',
+          wamid = $2,
+          sent_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      `,
+      [job.id, result.id]
+    );
+
+    // نحفظ في محادثة العميل عشان البوت يعرف إنه وصله العرض
+    await saveConversation(
+      job.customer_phone,
+      'assistant',
+      template.logText ||
+        `[قالب مرسل: ${template.name}]`,
+      job.id
+    );
+
+    console.log(
+      `📤 قالب ${template.name} إلى ${job.customer_phone}: قبلته واتساب`
+    );
+
+  } else {
+
+    await pool.query(
+      `
+      UPDATE template_messages
+      SET status = 'failed',
+          error_code = $2,
+          error_text = $3,
+          failed_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      `,
+      [
+        job.id,
+        result.code || null,
+        [
+          result.error,
+          result.detail && result.detail !== result.error
+            ? result.detail
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' — ')
+          .slice(0, 500),
+      ]
+    );
+
+    console.log(
+      `❌ قالب ${template.name} إلى ${job.customer_phone}: رفضته واتساب (${result.error})`
+    );
+  }
+}
+
+
+// لما تخلص رسائل حملة، نعلّمها "اكتملت" ونرسل ملخص لمن طلبها بأمر الواتساب
+async function finishCompletedCampaigns() {
+
+  const finished =
+    await pool.query(`
+      UPDATE campaigns c
+      SET status = 'done', finished_at = CURRENT_TIMESTAMP
+      WHERE c.status = 'running'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM template_messages tm
+          WHERE tm.campaign_id = c.id
+            AND tm.status IN ('queued', 'sending')
+        )
+      RETURNING c.id, c.template_name, c.notify_phone
+    `);
+
+  for (const campaign of finished.rows) {
+
+    console.log(
+      `✅ انتهت الحملة #${campaign.id}`
+    );
+
+    if (!campaign.notify_phone) {
+      continue;
+    }
+
+    const counts =
+      await pool.query(
+        `
+        SELECT status, COUNT(*)::int AS n
+        FROM template_messages
+        WHERE campaign_id = $1
+        GROUP BY status
+        `,
+        [campaign.id]
+      );
+
+    const n = {};
+
+    for (const row of counts.rows) {
+      n[row.status] = row.n;
+    }
+
+    const accepted =
+      (n.sent || 0) +
+      (n.delivered || 0) +
+      (n.read || 0);
+
+    await sendWhatsAppText(
+      campaign.notify_phone,
+      `✅ انتهى إرسال القالب "${campaign.template_name}"\n\nقبلتها واتساب: ${accepted}\nرفضتها واتساب: ${n.failed || 0}\n\nتابع حالة كل رسالة (وصلت / قُرئت) من لوحة التحكم.`
+    );
+  }
+}
+
+
+async function campaignWorkerLoop() {
+
+  while (true) {
+
+    try {
+
+      const job =
+        await claimNextMessage();
+
+      if (!job) {
+
+        await finishCompletedCampaigns();
+
+        await idleWait(3000);
+
+        continue;
+      }
+
+      await processQueuedMessage(job);
+
+      await finishCompletedCampaigns();
+
+      await sleep(
+        clampDelaySeconds(job.delay_seconds) * 1000
+      );
+
+    } catch (err) {
+
+      console.error(
+        'Campaign worker error:',
+        err
+      );
+
+      await sleep(5000);
+    }
+  }
+}
+
+
+async function startCampaignQueue() {
+
+  // رسائل كانت قيد الإرسال لما توقف السيرفر: ما نعيد إرسالها (حتى ما نكرر الرسالة للعميل)
+  const interrupted =
+    await pool.query(`
+      UPDATE template_messages
+      SET status = 'failed',
+          error_text = 'توقف السيرفر أثناء إرسال هذه الرسالة، تحقق من العميل قبل إعادة الإرسال',
+          failed_at = CURRENT_TIMESTAMP
+      WHERE status = 'sending'
+      RETURNING id
+    `);
+
+  const queued =
+    await pool.query(`
+      SELECT COUNT(*)::int AS n
+      FROM template_messages tm
+      JOIN campaigns c ON c.id = tm.campaign_id
+      WHERE tm.status = 'queued'
+        AND c.status = 'running'
+    `);
+
   console.log(
-    `📤 قالب ${template.name}: نجح ${sent.length} — فشل ${failed.length}`
+    `Campaign queue: enabled (${queued.rows[0].n} queued, ${interrupted.rows.length} interrupted)`
   );
 
-  return { sent, failed };
+  campaignWorkerLoop();
 }
 
 
@@ -1923,29 +2482,27 @@ async function runAdminSendTemplate(
     return;
   }
 
-  await sendWhatsAppText(
-    adminPhone,
-    `⏳ جاري إرسال قالب "${command.templateKey}" إلى ${command.numbers.length} رقم...`
+  await createCampaign(
+    command.templateKey,
+    command.numbers,
+    {
+      delaySeconds: DEFAULT_SEND_DELAY_SECONDS,
+      notifyPhone: adminPhone,
+    }
   );
 
-  const { sent, failed } =
-    await sendTemplateToNumbers(
-      command.template,
-      command.numbers
+  const minutes =
+    Math.max(
+      1,
+      Math.round(
+        command.numbers.length *
+        DEFAULT_SEND_DELAY_SECONDS / 60
+      )
     );
-
-  let summary =
-`✅ تم الإرسال: ${sent.length}
-❌ فشل: ${failed.length}`;
-
-  if (failed.length) {
-    summary +=
-      `\n\nالأرقام اللي فشلت:\n${failed.slice(0, 20).join('\n')}`;
-  }
 
   await sendWhatsAppText(
     adminPhone,
-    summary
+    `⏳ تمت جدولة إرسال قالب "${command.templateKey}" إلى ${command.numbers.length} رقم، رسالة كل ${DEFAULT_SEND_DELAY_SECONDS} ثواني (حوالي ${minutes} دقيقة).\n\nيكمل في الخلفية وبيوصلك ملخص لما ينتهي. وتقدر تتابع حالة كل رسالة من لوحة التحكم.`
   );
 }
 
@@ -2254,6 +2811,25 @@ async function createReportWorkbook() {
       ORDER BY created_at DESC
     `);
 
+  const templateMessages =
+    await pool.query(`
+      SELECT
+        id,
+        campaign_id,
+        customer_phone,
+        template_name,
+        status,
+        error_code,
+        error_text,
+        queued_at,
+        sent_at,
+        delivered_at,
+        read_at,
+        failed_at
+      FROM template_messages
+      ORDER BY id DESC
+    `);
+
   const workbook =
     XLSX.utils.book_new();
 
@@ -2273,6 +2849,12 @@ async function createReportWorkbook() {
     workbook,
     XLSX.utils.json_to_sheet(escalations.rows),
     'Manager Escalations'
+  );
+
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.json_to_sheet(templateMessages.rows),
+    'Template Messages'
   );
 
   return XLSX.write(
@@ -2956,6 +3538,10 @@ app.post(
                 status
               );
 
+              await persistStatus(
+                status
+              );
+
             } catch (statusError) {
 
               console.error(
@@ -3008,9 +3594,13 @@ registerDashboard(app, {
   normalizePhone,
   toInternationalSaudi,
   TEMPLATES,
-  sendTemplateToNumbers,
+  createCampaign,
+  setCampaignStatus,
+  extractNumbers,
   createReportWorkbook,
   password: DASHBOARD_PASSWORD,
+  maxNumbersPerCampaign: MAX_NUMBERS_PER_CAMPAIGN,
+  defaultDelaySeconds: DEFAULT_SEND_DELAY_SECONDS,
 });
 
 
@@ -3096,6 +3686,14 @@ async function startServer() {
         console.log(
           'Delivery status tracking: enabled'
         );
+
+        startCampaignQueue().catch((err) => {
+
+          console.error(
+            'Campaign queue start error:',
+            err
+          );
+        });
       }
     );
 
